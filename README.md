@@ -85,6 +85,16 @@ framebuffer, and the interactive shell. Note: the image is padded to 16 MiB
 because SeaBIOS/ATAPI in this QEMU build fails to read smaller ISOs. The disk
 images (`zenith.img`, `zenith-uefi.img`) remain the primary tested targets.
 
+If your VM displays the framebuffer rotated or mirrored (e.g. the dock appears
+at the top and text reads backwards), rebuild with the orientation flag:
+
+```bash
+ZENITH_FB_FLIP=xy ./build_iso.sh     # 180-degree rotation
+```
+
+Valid values: `x` (mirror horizontally), `y` (flip vertically), `xy` (rotate
+180°). Omit the variable for the default, correct orientation used by QEMU.
+
 The bare-metal target `x86_64-unknown-none` must be installed with
 `rustup target add x86_64-unknown-none` for a pure cross-compiled kernel; when
 it is absent the scripts verify sources on the host target and say so.

@@ -1,6 +1,7 @@
 //! Linear framebuffer graphics, discovered from the Multiboot2 info structure.
 
 use core::ptr::read_unaligned;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::diagnostics;
 use crate::font::FONT;
@@ -34,6 +35,63 @@ struct Framebuffer {
 }
 
 static FRAMEBUFFER: SpinLock<Option<Framebuffer>> = SpinLock::new(None);
+
+/// Framebuffer orientation. Some VMs present the linear framebuffer rotated
+/// 180 degrees. Set `ZENITH_FB_FLIP` to `x`, `y`, or `xy` when building, or call
+/// `set_orientation()` at runtime, to correct it.
+const fn str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn flip_from(value: Option<&str>, horizontal: bool) -> bool {
+    match value {
+        Some(setting) => {
+            if horizontal {
+                str_eq(setting, "x") || str_eq(setting, "xy")
+            } else {
+                str_eq(setting, "y") || str_eq(setting, "xy")
+            }
+        }
+        None => false,
+    }
+}
+
+const FLIP_X_DEFAULT: bool = flip_from(option_env!("ZENITH_FB_FLIP"), true);
+const FLIP_Y_DEFAULT: bool = flip_from(option_env!("ZENITH_FB_FLIP"), false);
+
+static FLIP_X: AtomicBool = AtomicBool::new(FLIP_X_DEFAULT);
+static FLIP_Y: AtomicBool = AtomicBool::new(FLIP_Y_DEFAULT);
+
+/// Set framebuffer orientation (used to correct VMs with a rotated display).
+pub fn set_orientation(flip_x: bool, flip_y: bool) {
+    FLIP_X.store(flip_x, Ordering::Relaxed);
+    FLIP_Y.store(flip_y, Ordering::Relaxed);
+}
+
+/// Current orientation as `(flip_x, flip_y)`.
+pub fn orientation() -> (bool, bool) {
+    (FLIP_X.load(Ordering::Relaxed), FLIP_Y.load(Ordering::Relaxed))
+}
+
+#[inline]
+fn mapped(fb: &Framebuffer, x: usize, y: usize) -> (usize, usize) {
+    (
+        if FLIP_X.load(Ordering::Relaxed) { fb.width - 1 - x } else { x },
+        if FLIP_Y.load(Ordering::Relaxed) { fb.height - 1 - y } else { y },
+    )
+}
 
 /// ACPI RSDP pointer reported by the Multiboot2 ACPI tag (type 14).
 static mut MB2_RSDP: u64 = 0;
@@ -160,11 +218,7 @@ fn clear_cell(fb: &Framebuffer, column: usize, row: usize) {
 fn scroll_up(fb: &Framebuffer) {
     for y in 0..fb.height.saturating_sub(TEXT_CELL) {
         for x in 0..fb.width {
-            let pixel = unsafe {
-                core::ptr::read_volatile(
-                    (fb.address + (y + TEXT_CELL) * fb.pitch + x * fb.bytes_per_pixel) as *const u32,
-                )
-            };
+            let pixel = get_pixel(fb, x, y + TEXT_CELL);
             put_pixel(fb, x, y, pixel);
         }
     }
@@ -247,10 +301,21 @@ fn put_pixel(fb: &Framebuffer, x: usize, y: usize, color: u32) {
     if x >= fb.width || y >= fb.height {
         return;
     }
+    let (x, y) = mapped(fb, x, y);
     let offset = y * fb.pitch + x * fb.bytes_per_pixel;
     unsafe {
         core::ptr::write_volatile((fb.address + offset) as *mut u32, color);
     }
+}
+
+#[inline]
+fn get_pixel(fb: &Framebuffer, x: usize, y: usize) -> u32 {
+    if x >= fb.width || y >= fb.height {
+        return 0;
+    }
+    let (x, y) = mapped(fb, x, y);
+    let offset = y * fb.pitch + x * fb.bytes_per_pixel;
+    unsafe { core::ptr::read_volatile((fb.address + offset) as *const u32) }
 }
 
 /// Draw a filled rectangle.
