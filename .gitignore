@@ -3,3 +3,6 @@
 *.img
 *.iso
 *.log
+
+target/
+**/target/
