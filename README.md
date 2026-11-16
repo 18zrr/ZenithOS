@@ -1,2 +1,95 @@
-# ZenithOS
-An independent desktop operating system built from scratch in Rust, featuring a custom kernel, Zenith FS, Zenith UI, and future Vulkan, Linux app, Steam and Proton compatibility.
+# Zenith OS - Project Specification and Status
+
+Zenith OS is an independent x86_64 operating system written in Rust, with
+assembly for the boot entry points. It uses a custom monolithic kernel, a
+custom filesystem (Zenith FS), and a custom graphical environment (Zenith UI).
+
+## Layout
+
+```
+boot/           Limine bootloader configurations
+kernel/         Rust kernel + x86_64 assembly + linker scripts
+drivers/        Driver framework and hardware drivers
+filesystem/zenith-fs/   Zenith FS v5, FAT32, NTFS, ext4 drivers + VFS
+gui/zenith-ui/  Zenith UI data model
+userland/       Terminal, file manager, settings, calculator, browser,
+                media player, system monitor
+tools/          Image-building helpers (FAT16/FAT32/NTFS/ext4/ISO)
+docs/           Documentation
+```
+
+All crates are members of one Cargo workspace rooted at `Cargo.toml`.
+
+## Current status (verified)
+
+- `cargo build --workspace` and `cargo test --workspace` pass (13 zenith-fs tests).
+- Boots to an interactive shell through three paths: QEMU PVH direct load,
+  Limine BIOS disk image, and Limine UEFI image + OVMF.
+- Kernel: 64-bit boot trampoline, page tables with demand paging and a verified
+  page-fault recovery test, IDT/PIC/PIT, serial + VGA + framebuffer text
+  console, framebuffer desktop, cooperative scheduler, PS/2 keyboard.
+- Drivers: PCI, ATA PIO read/write, ACPI RSDP, e1000 (TX/MAC/link), UHCI USB
+  controller + port detection, NVIDIA detection/probing.
+- Zenith FS v5: write-ahead journaling with replay, extents, 64-bit file sizes
+  and sparse files (tested with a 200 GiB file), Unix rwx permissions with
+  owner/group and `chmod`/`chown`, nested directories, VFS trait. FAT32, NTFS
+  and ext4 drivers are read-only and read test files from disk.
+- Network stack: DHCP, UDP echo and TCP handshake/echo frame construction and
+  TX are implemented; DHCP DISCOVER is transmitted. **RX is not validated** —
+  no packets were ever received in QEMU, so end-to-end networking is unproven.
+
+## Known limitations
+
+- e1000 RX path is written but unvalidated; no live DHCP/UDP/TCP exchange.
+- USB device enumeration/control transfers time out under QEMU.
+- Scheduling is cooperative; no APIC preemption.
+- FAT32/NTFS/ext4 are read-only; no VFS mount table.
+- Native GPU driver (nouveau for RTX 4070 SUPER) and Linux compatibility are
+  not implemented — they need proprietary firmware/hardware or an OS-scale
+  effort. Graphics come from Limine's VBE/GOP framebuffer.
+- Userland apps are host harnesses; no syscall-driven OS process model yet.
+- No login/authentication: kernel starts as root.
+
+## Building and booting
+
+```bash
+cargo build --workspace
+cargo test --workspace
+./build.sh                      # release build of all userland apps
+./test_build.sh                 # workspace + kernel verification
+cd kernel && make qemu          # QEMU PVH direct load
+./build_image.sh                # BIOS disk image  -> zenith.img
+./build_uefi_image.sh           # UEFI disk image  -> zenith-uefi.img
+```
+
+Boot a disk image (or the ISO below):
+```bash
+qemu-system-x86_64 -drive format=raw,file=zenith.img -display none -serial stdio
+qemu-system-x86_64 -cdrom zenith.iso -boot d -display none -serial stdio
+```
+
+## ISO image
+
+`./build_iso.sh` builds `zenith.iso` with Limine's BIOS bootloader using
+`pycdlib` (install with `python3 -m pip install pycdlib`). The generated ISO is
+a valid ISO9660 image containing `limine.conf`, `kernel.bin`, and Limine's
+boot files with an El Torito BIOS boot entry:
+
+```bash
+./build_iso.sh
+qemu-system-x86_64 -cdrom zenith.iso -boot d -display none -serial stdio
+```
+
+The ISO is **verified bootable** in QEMU: it loads Limine, the kernel, the
+framebuffer, and the interactive shell. Note: the image is padded to 16 MiB
+because SeaBIOS/ATAPI in this QEMU build fails to read smaller ISOs. The disk
+images (`zenith.img`, `zenith-uefi.img`) remain the primary tested targets.
+
+The bare-metal target `x86_64-unknown-none` must be installed with
+`rustup target add x86_64-unknown-none` for a pure cross-compiled kernel; when
+it is absent the scripts verify sources on the host target and say so.
+
+## Development rules
+
+See `DEVELOPMENT_RULES.md`, `INTERFACES.md`, `ARCHITECTURE.md`, `ROADMAP.md`,
+and `DECISIONS.md`.

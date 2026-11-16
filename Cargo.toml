@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "drivers",
+    "drivers/acpi",
+    "drivers/pci",
+    "drivers/usb",
+    "drivers/keyboard",
+    "drivers/network",
+    "drivers/storage",
+    "filesystem/zenith-fs",
+    "gui/zenith-ui",
+    "userland/terminal",
+    "userland/filemanager",
+    "userland/systemsettings",
+    "userland/calculator",
+    "userland/browser",
+    "userland/mediaplayer",
+    "userland/systemmonitor",
+]
+
+[profile.dev]
+panic = 'abort'
+
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = 'abort'

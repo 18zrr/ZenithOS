@@ -1,0 +1,10 @@
+[package]
+name = "drivers"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# No external dependencies for the core driver framework
+
+[lib]
+crate-type = ["rlib"]

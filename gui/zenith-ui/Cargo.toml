@@ -1,0 +1,10 @@
+[package]
+name = "zenith-ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Add any necessary dependencies here
+
+[lib]
+crate-type = ["rlib"]
