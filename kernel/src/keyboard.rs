@@ -17,6 +17,30 @@ static BUFFER: SpinLock<Buffer> = SpinLock::new(Buffer {
     tail: 0,
 });
 
+/// Raw scancodes for non-printable keys (function keys, etc.).
+struct RawBuffer {
+    data: [u8; 16],
+    head: usize,
+    tail: usize,
+}
+
+static RAW: SpinLock<RawBuffer> = SpinLock::new(RawBuffer {
+    data: [0; 16],
+    head: 0,
+    tail: 0,
+});
+
+/// Return the most recent raw scancode, if one has arrived.
+pub fn take_raw() -> Option<u8> {
+    let mut buffer = RAW.lock();
+    if buffer.head == buffer.tail {
+        return None;
+    }
+    let value = buffer.data[buffer.head];
+    buffer.head = (buffer.head + 1) % buffer.data.len();
+    Some(value)
+}
+
 /// Translate a scancode set 1 make-code to ASCII (0 = no printable mapping).
 fn scancode_to_ascii(code: u8) -> u8 {
     match code {
@@ -81,6 +105,18 @@ pub fn irq() {
     if code & 0x80 != 0 {
         return; // key release
     }
+    // Keep the raw make-code for special keys such as F12 (0x58).
+    {
+        let mut raw = RAW.lock();
+        let head = raw.head;
+        let tail = raw.tail;
+        let next = (tail + 1) % raw.data.len();
+        if next != head {
+            raw.data[tail] = code;
+            raw.tail = next;
+        }
+    }
+
     let ascii = scancode_to_ascii(code);
     if ascii != 0 {
         let mut buffer = BUFFER.lock();

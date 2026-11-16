@@ -86,7 +86,11 @@ because SeaBIOS/ATAPI in this QEMU build fails to read smaller ISOs. The disk
 images (`zenith.img`, `zenith-uefi.img`) remain the primary tested targets.
 
 If your VM displays the framebuffer rotated or mirrored (e.g. the dock appears
-at the top and text reads backwards), rebuild with the orientation flag:
+at the top and text reads backwards), **press F12** in the VM. The first press
+applies a 180° rotation; further presses cycle through the other orientations.
+The console prints the active mode after each press.
+
+To make a configuration permanent, rebuild with the orientation flag:
 
 ```bash
 ZENITH_FB_FLIP=xy ./build_iso.sh     # 180-degree rotation

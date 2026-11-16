@@ -137,6 +137,12 @@ fn shell_task() {
     diagnostics::puts("\n[shell] ready - type to echo, backspace to delete\n");
     let mut last_ticks = timer::ticks();
     loop {
+        // F12 cycles the framebuffer orientation for VMs with rotated displays.
+        if let Some(scancode) = keyboard::take_raw() {
+            if scancode == 0x58 {
+                crate::framebuffer::cycle_orientation();
+            }
+        }
         if let Some(byte) = keyboard::read_char() {
             match byte {
                 b'\r' | b'\n' => {

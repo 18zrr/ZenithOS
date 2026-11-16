@@ -85,6 +85,37 @@ pub fn orientation() -> (bool, bool) {
     (FLIP_X.load(Ordering::Relaxed), FLIP_Y.load(Ordering::Relaxed))
 }
 
+/// Cycle orientation: normal -> X -> XY -> Y -> normal, then redraw.
+/// Used by the F12 debug key so a rotated VM can be corrected at runtime.
+pub fn cycle_orientation() {
+    let (x, y) = orientation();
+    let (next_x, next_y) = match (x, y) {
+        (false, false) => (true, true), // first press fixes a 180-degree VM
+        (true, true) => (true, false),
+        (true, false) => (false, true),
+        (false, true) => (false, false),
+    };
+    set_orientation(next_x, next_y);
+
+    // Reset the console and repaint the desktop so the change is immediate.
+    {
+        let mut cursor = TEXT.lock();
+        cursor.column = 0;
+        cursor.row = 0;
+    }
+    clear(TEXT_BACKGROUND);
+    draw_desktop();
+    let label = match (next_x, next_y) {
+        (false, false) => "normal",
+        (true, false) => "mirror-x",
+        (true, true) => "rotated-180",
+        (false, true) => "flip-y",
+    };
+    diagnostics::println("[fb] orientation:");
+    diagnostics::println(label);
+    diagnostics::println("[fb] F12 to change");
+}
+
 #[inline]
 fn mapped(fb: &Framebuffer, x: usize, y: usize) -> (usize, usize) {
     (
