@@ -49,9 +49,10 @@ not replace CR3; it uses Limine's mappings and HHDM directly.
 After the framebuffer is initialised, `framebuffer::splash_init()` paints a
 Deepin-inspired boot screen: a framed logo, the `ZENITH OS` title, a tagline and
 a progress bar. `splash_step()` updates the status text and progress as real
-subsystems initialise; the finished splash is held briefly before
-`boot_complete()` paints the desktop. No artificial work is inserted — the
-progress reflects the actual boot sequence.
+subsystems initialise; the finished splash is held briefly, then `wm::init()`
+sets up the compositor and `boot_complete()` switches the screen to the
+desktop. No artificial work is inserted — the progress reflects the actual boot
+sequence.
 
 ## Kernel entry
 

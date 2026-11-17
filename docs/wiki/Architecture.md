@@ -7,10 +7,10 @@ Zenith OS uses a monolithic x86_64 kernel with modular supporting crates.
 | Layer | Location | Responsibility |
 |---|---|---|
 | Boot | `boot/`, `kernel/src/arch/x86_64/` | Limine handoff, long-mode trampoline, descriptors |
-| Kernel | `kernel/src/` | Paging, interrupts, scheduler, consoles, hardware probing, syscall setup |
+| Kernel | `kernel/src/` | Paging, interrupts, scheduler, compositor/window manager, consoles, hardware probing, syscall setup |
 | Filesystems | `filesystem/zenith-fs/` | Zenith FS v5, FAT32, NTFS, ext4, VFS trait |
 | Drivers | `drivers/` | Driver framework and device skeletons |
-| GUI | `gui/zenith-ui/` | UI data model |
+| GUI | `gui/zenith-ui/` | Software `Surface`/theme model; the live desktop is kernel-side |
 | Userland | `userland/` | Seven application libraries and host harnesses |
 | Tooling | `tools/` | Image and filesystem generators |
 

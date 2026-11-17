@@ -33,6 +33,24 @@ pub fn serial_puts(message: &str) {
     }
 }
 
+/// Print a u64 in decimal to COM1 only.
+pub fn serial_put_dec(mut value: u64) {
+    if value == 0 {
+        putc(b'0');
+        return;
+    }
+    let mut buffer = [0u8; 20];
+    let mut start = buffer.len();
+    while value > 0 {
+        start -= 1;
+        buffer[start] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    for &byte in &buffer[start..] {
+        putc(byte);
+    }
+}
+
 /// Print a u64 as hexadecimal to COM1 only.
 pub fn serial_put_hex(value: u64) {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";

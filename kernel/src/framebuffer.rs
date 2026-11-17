@@ -1,7 +1,7 @@
 //! Linear framebuffer graphics, discovered from the Multiboot2 info structure.
 
 use core::ptr::read_unaligned;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::diagnostics;
 use crate::font::FONT;
@@ -78,16 +78,18 @@ static FLIP_Y: AtomicBool = AtomicBool::new(FLIP_Y_DEFAULT);
 /// serial; the framebuffer is painted only once `boot_complete()` is called.
 static CONSOLE_READY: AtomicBool = AtomicBool::new(false);
 
-/// Repaint the desktop chrome and reset the console to the top-left.
+/// Repaint the desktop and reset the console to the top-left.
 pub fn clear_screen() {
     reset_cursor();
-    clear(BG);
-    draw_desktop();
+    *SHADOW.lock() = [[0; SHADOW_COLS]; SHADOW_ROWS];
+    crate::wm::render_now();
 }
 
 /// Show the finished desktop and enable on-screen console output.
 pub fn boot_complete() {
-    clear_screen();
+    reset_cursor();
+    *SHADOW.lock() = [[0; SHADOW_COLS]; SHADOW_ROWS];
+    crate::wm::render_now();
     CONSOLE_READY.store(true, Ordering::Release);
 }
 
@@ -155,7 +157,6 @@ pub fn init() {
                 bytes_per_pixel: (fb.bpp / 8) as usize,
             });
             diagnostics::debug("Limine linear framebuffer detected");
-            draw_desktop();
             return;
         }
     }
@@ -219,7 +220,6 @@ pub fn init() {
 
     if FRAMEBUFFER.lock().is_some() {
         diagnostics::debug("framebuffer detected");
-        draw_desktop();
     }
 }
 
@@ -240,47 +240,28 @@ pub fn dimensions() -> (usize, usize) {
 struct TextCursor {
     column: usize,
     row: usize,
-    color: u32,
 }
 
 static TEXT: SpinLock<TextCursor> = SpinLock::new(TextCursor {
     column: 0,
     row: 0,
-    color: 0x00E8E6E3,
 });
 
-// Console layout. The 8x8 font is scaled 2x into 16x16 glyphs; ROW_PITCH adds
-// four pixels of breathing room between lines. The header and dock are static
-// and the console scrolls only in the region between them.
+// Logical console layout. The window manager decides where the terminal window
+// sits; this module only tracks the text grid and how many cells fit.
 const COL_PITCH: usize = 16;
 const ROW_PITCH: usize = 20;
-const HEADER_H: usize = 40;
-const DOCK_H: usize = 88;
-const MARGIN_X: usize = 24;
+const ACCENT: u32 = 0x000078D4;
+const SHADOW_COLS: usize = 100;
+const SHADOW_ROWS: usize = 40;
 
-const BG: u32 = 0x00181C20;
-const PANEL: u32 = 0x00212930;
-const TITLEBAR: u32 = 0x002D8FB0;
-const ACCENT: u32 = 0x00E17055;
-const FG: u32 = 0x00E8E6E3;
-const MUTED: u32 = 0x008A969B;
+static CONSOLE_COLS: AtomicUsize = AtomicUsize::new(56);
+static CONSOLE_ROWS: AtomicUsize = AtomicUsize::new(20);
 
-fn console_columns(fb: &Framebuffer) -> usize {
-    let columns = fb.width.saturating_sub(MARGIN_X * 2) / COL_PITCH;
-    if columns == 0 { 1 } else { columns.min(100) }
-}
-
-fn console_rows(fb: &Framebuffer) -> usize {
-    let rows = fb.height.saturating_sub(HEADER_H + DOCK_H) / ROW_PITCH;
-    if rows == 0 { 1 } else { rows }
-}
-
-fn cell_x(column: usize) -> usize {
-    MARGIN_X + column * COL_PITCH
-}
-
-fn cell_y(row: usize) -> usize {
-    HEADER_H + row * ROW_PITCH
+/// Tell the console how many character cells fit in the visible terminal.
+pub fn set_console_size(columns: usize, rows: usize) {
+    CONSOLE_COLS.store(columns.clamp(1, SHADOW_COLS), Ordering::Relaxed);
+    CONSOLE_ROWS.store(rows.clamp(1, SHADOW_ROWS), Ordering::Relaxed);
 }
 
 fn reset_cursor() {
@@ -289,48 +270,103 @@ fn reset_cursor() {
     cursor.row = 0;
 }
 
-/// Clear one character cell (including the inter-line gap).
-fn clear_cell(fb: &Framebuffer, column: usize, row: usize) {
-    let start_x = cell_x(column);
-    let start_y = cell_y(row);
-    for y in start_y..start_y + ROW_PITCH {
-        for x in start_x..start_x + COL_PITCH {
-            put_pixel(fb, x, y, BG);
+/// Logical cursor position as `(column, row)`.
+pub fn console_cursor() -> (usize, usize) {
+    let cursor = TEXT.lock();
+    (cursor.column, cursor.row)
+}
+
+// A shadow copy of the console is the source of truth for terminal text. The
+// compositor replays it into the terminal window on every frame.
+static SHADOW: SpinLock<[[u8; SHADOW_COLS]; SHADOW_ROWS]> =
+    SpinLock::new([[0; SHADOW_COLS]; SHADOW_ROWS]);
+
+fn draw_glyph_to(
+    frame: &mut [u32],
+    stride: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    byte: u8,
+    color: u32,
+) {
+    let glyph = &FONT[(byte as usize) & 0x7F];
+    for row in 0..8 {
+        let py = y + row * 2;
+        if py + 1 >= height {
+            break;
+        }
+        for column in 0..8 {
+            if glyph[row] & (1 << (7 - column)) == 0 {
+                continue;
+            }
+            let px = x + column * 2;
+            if px + 1 >= stride {
+                continue;
+            }
+            let offset = py * stride + px;
+            frame[offset] = color;
+            frame[offset + 1] = color;
+            frame[offset + stride] = color;
+            frame[offset + stride + 1] = color;
         }
     }
 }
 
-/// Scroll the console region up by one row; the header and dock stay fixed.
-fn scroll_up(fb: &Framebuffer) {
-    let top = HEADER_H;
-    let bottom = fb.height.saturating_sub(DOCK_H);
-    for y in top..bottom.saturating_sub(ROW_PITCH) {
-        for x in 0..fb.width {
-            let pixel = get_pixel(fb, x, y + ROW_PITCH);
-            put_pixel(fb, x, y, pixel);
-        }
+/// Replay the console shadow into a compositor frame buffer.
+pub fn draw_console_into(
+    frame: &mut [u32],
+    stride: usize,
+    height: usize,
+    x0: usize,
+    y0: usize,
+    clip_w: usize,
+    clip_h: usize,
+    color: u32,
+) {
+    if stride == 0 || height == 0 || frame.len() < stride.saturating_mul(height) {
+        return;
     }
-    for y in bottom.saturating_sub(ROW_PITCH)..bottom {
-        for x in 0..fb.width {
-            put_pixel(fb, x, y, BG);
+    let shadow = SHADOW.lock();
+    let columns = (clip_w / COL_PITCH).min(SHADOW_COLS);
+    let rows = (clip_h / ROW_PITCH).min(SHADOW_ROWS);
+    for row in 0..rows {
+        for column in 0..columns {
+            let byte = shadow[row][column];
+            if byte != 0 {
+                draw_glyph_to(
+                    frame,
+                    stride,
+                    height,
+                    x0 + column * COL_PITCH,
+                    y0 + row * ROW_PITCH,
+                    byte,
+                    color,
+                );
+            }
         }
     }
 }
 
-/// Write one character to the framebuffer console (2x scaled 8x8 glyph).
+fn scroll_up(shadow: &mut [[u8; SHADOW_COLS]; SHADOW_ROWS]) {
+    for row in 0..SHADOW_ROWS - 1 {
+        shadow[row] = shadow[row + 1];
+    }
+    shadow[SHADOW_ROWS - 1] = [0; SHADOW_COLS];
+}
+
+/// Write one character into the console shadow. The compositor repaints the
+/// terminal window from that shadow on the next frame.
 pub fn putc(byte: u8) {
-    // Boot logs are for COM1 only; nothing is painted until boot_complete().
+    // Boot logs are for COM1 only; nothing is displayed until boot_complete().
     if !CONSOLE_READY.load(Ordering::Acquire) {
         return;
     }
 
-    let framebuffer = FRAMEBUFFER.lock();
-    let Some(fb) = framebuffer.as_ref() else {
-        return;
-    };
+    let columns = CONSOLE_COLS.load(Ordering::Relaxed);
+    let rows = CONSOLE_ROWS.load(Ordering::Relaxed);
     let mut cursor = TEXT.lock();
-    let columns = console_columns(fb);
-    let rows = console_rows(fb);
+    let mut shadow = SHADOW.lock();
 
     match byte {
         b'\n' => {
@@ -341,28 +377,14 @@ pub fn putc(byte: u8) {
         0x08 => {
             if cursor.column > 0 {
                 cursor.column -= 1;
-                clear_cell(fb, cursor.column, cursor.row);
+                if cursor.row < SHADOW_ROWS && cursor.column < SHADOW_COLS {
+                    shadow[cursor.row][cursor.column] = 0;
+                }
             }
         }
         other => {
-            clear_cell(fb, cursor.column, cursor.row);
-            let glyph = &FONT[(other as usize) & 0x7F];
-            for row in 0..8 {
-                for column in 0..8 {
-                    if glyph[row] & (1 << (7 - column)) == 0 {
-                        continue;
-                    }
-                    for dy in 0..2 {
-                        for dx in 0..2 {
-                            put_pixel(
-                                fb,
-                                cell_x(cursor.column) + column * 2 + dx,
-                                cell_y(cursor.row) + row * 2 + dy,
-                                cursor.color,
-                            );
-                        }
-                    }
-                }
+            if cursor.row < SHADOW_ROWS && cursor.column < SHADOW_COLS {
+                shadow[cursor.row][cursor.column] = other;
             }
             cursor.column += 1;
         }
@@ -373,9 +395,12 @@ pub fn putc(byte: u8) {
         cursor.row += 1;
     }
     if cursor.row >= rows {
-        scroll_up(fb);
-        cursor.row = rows - 1;
+        scroll_up(&mut shadow);
+        cursor.row = rows.saturating_sub(1);
     }
+    drop(shadow);
+    drop(cursor);
+    crate::wm::invalidate();
 }
 
 /// Write a string to the framebuffer console.
@@ -410,16 +435,6 @@ fn put_pixel(fb: &Framebuffer, x: usize, y: usize, color: u32) {
     unsafe {
         core::ptr::write_volatile((fb.address + offset) as *mut u32, color);
     }
-}
-
-#[inline]
-fn get_pixel(fb: &Framebuffer, x: usize, y: usize) -> u32 {
-    if x >= fb.width || y >= fb.height {
-        return 0;
-    }
-    let (x, y) = mapped(fb, x, y);
-    let offset = y * fb.pitch + x * fb.bytes_per_pixel;
-    unsafe { core::ptr::read_volatile((fb.address + offset) as *const u32) }
 }
 
 /// Draw a filled rectangle.
@@ -467,36 +482,45 @@ fn draw_text(fb: &Framebuffer, x: usize, y: usize, text: &str, color: u32) {
     }
 }
 
-/// Draw the window chrome: a title bar, the console background, and a dock.
-fn draw_desktop() {
+/// Copy a composited frame into the linear framebuffer.
+///
+/// The frame is `width * height` pixels in `0x00RRGGBB` form. Row copies use
+/// 64-bit stores and honour the runtime display orientation.
+pub fn present(frame: &[u32]) {
     let framebuffer = FRAMEBUFFER.lock();
     let Some(fb) = framebuffer.as_ref() else {
         return;
     };
-    let (width, height) = (fb.width, fb.height);
+    if fb.bytes_per_pixel != 4 || frame.len() < fb.width.saturating_mul(fb.height) {
+        return;
+    }
+    let flip_x = FLIP_X.load(Ordering::Relaxed);
+    let flip_y = FLIP_Y.load(Ordering::Relaxed);
 
-    clear_locked(fb, BG);
-
-    // Title bar with an accent stripe and a hairline separator.
-    fill_rect_locked(fb, 0, 0, width, HEADER_H, PANEL);
-    fill_rect_locked(fb, 0, 0, width, 4, ACCENT);
-    fill_rect_locked(fb, 0, HEADER_H - 1, width, 1, TITLEBAR);
-    draw_text(fb, MARGIN_X, (HEADER_H - 16) / 2, "ZENITH OS", FG);
-    let version = "v0.1.0";
-    let version_x = width.saturating_sub(MARGIN_X + version.len() * COL_PITCH);
-    draw_text(fb, version_x, (HEADER_H - 16) / 2, version, MUTED);
-
-    // Dock at the bottom, centred, with a subtle accent divider.
-    let dock_size = (height / 12).min(72);
-    let dock_y = height.saturating_sub(dock_size + 16);
-    let dock_w = dock_size * 7;
-    let dock_x = (width.saturating_sub(dock_w)) / 2;
-    fill_rect_locked(fb, dock_x, dock_y, dock_w, dock_size, PANEL);
-    fill_rect_locked(fb, dock_x, dock_y, dock_w, 2, ACCENT);
-    for index in 0..6 {
-        let icon = if index % 2 == 0 { TITLEBAR } else { ACCENT };
-        fill_rect_locked(fb, dock_x + 8 + index * (dock_size + 4), dock_y + 10,
-                         dock_size - 16, dock_size - 20, icon);
+    for y in 0..fb.height {
+        let source_y = if flip_y { fb.height - 1 - y } else { y };
+        let source = &frame[source_y * fb.width..source_y * fb.width + fb.width];
+        let destination = (fb.address + y * fb.pitch) as *mut u32;
+        if flip_x {
+            for x in 0..fb.width {
+                unsafe {
+                    core::ptr::write_volatile(destination.add(x), source[fb.width - 1 - x]);
+                }
+            }
+        } else {
+            let mut x = 0;
+            while x + 2 <= fb.width {
+                let word = (source[x] as u64) | ((source[x + 1] as u64) << 32);
+                unsafe {
+                    core::ptr::write_volatile(destination.add(x) as *mut u64, word);
+                }
+                x += 2;
+            }
+            while x < fb.width {
+                unsafe { core::ptr::write_volatile(destination.add(x), source[x]) };
+                x += 1;
+            }
+        }
     }
 }
 

@@ -12,7 +12,9 @@ restores callee-saved registers and the stack pointer.
   `help`, `sysinfo`, `pci`, `mem`, `net`, `gpu`, `acpi`, `history`, `version`,
   `about`, `echo`, `uptime`, `clear`, and `flip`, all backed by real subsystem
   data. Backspace edits the line, Up/Down recall history, Enter runs it, and
-  F12 cycles framebuffer orientation.
+  F12 cycles framebuffer orientation. The same loop drains mouse events into the
+  window manager, handles Start menu input (**F1**, typing, arrows, Enter, Esc)
+  and pumps compositor redraws.
 - **Heartbeat task**: polls the NIC and writes a tick marker roughly once per
   second to COM1 serial only (not to the on-screen console).
 - **Idle task**: yields forever.

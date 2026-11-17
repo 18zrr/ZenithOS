@@ -21,7 +21,12 @@ with `./build.sh`.
 
 - The libraries compile and their meaningful logic is unit-tested.
 - The **terminal** has real command parsing (not just a demo stub).
-- `gui/zenith-ui/` is a UI **data model**, not a renderer.
+- `gui/zenith-ui/` now provides a real `Surface` software render target with
+  `clear`/`fill_rect`/`get`, a shared Fluent-style dark `Theme`, and a
+  `ZenithUIManager` that renders a wallpaper, window and taskbar into that
+  surface (unit-tested). The kernel's framebuffer driver is separate, so the
+  crate's surface is not yet wired to the screen — it remains a model and test
+  target rather than the live compositor.
 
 ## Important distinction
 
@@ -30,8 +35,12 @@ not yet have a syscall-driven userland: the kernel's `syscalls.rs` installs the
 `STAR`/`LSTAR`/`FMASK` MSRs and a small read/write/open/close dispatcher, but no
 user process uses it. There is no login; the kernel runs as root.
 
-The interactive shell you see at boot is part of the kernel (`task.rs`), not one
-of these userland apps. See [Scheduling](Scheduling.md).
+The interactive desktop and its windows are part of the kernel, not these
+crates: `kernel/src/wm.rs` draws the compositor, window manager, taskbar, Start
+menu and built-in windows (Terminal, System Monitor, Settings, About), and
+`kernel/src/task.rs` runs the shell loop and routes mouse and keyboard events.
+The interactive shell is likewise kernel code. See [Scheduling](Scheduling.md)
+and [Graphics](Graphics.md).
 
 ## Planned work
 

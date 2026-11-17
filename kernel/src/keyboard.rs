@@ -32,13 +32,15 @@ static RAW: SpinLock<RawBuffer> = SpinLock::new(RawBuffer {
 
 /// Return the most recent raw scancode, if one has arrived.
 pub fn take_raw() -> Option<u8> {
-    let mut buffer = RAW.lock();
-    if buffer.head == buffer.tail {
-        return None;
-    }
-    let value = buffer.data[buffer.head];
-    buffer.head = (buffer.head + 1) % buffer.data.len();
-    Some(value)
+    crate::interrupt::without_interrupts(|| {
+        let mut buffer = RAW.lock();
+        if buffer.head == buffer.tail {
+            return None;
+        }
+        let value = buffer.data[buffer.head];
+        buffer.head = (buffer.head + 1) % buffer.data.len();
+        Some(value)
+    })
 }
 
 /// Translate a scancode set 1 make-code to ASCII (0 = no printable mapping).
@@ -102,6 +104,15 @@ fn scancode_to_ascii(code: u8) -> u8 {
 /// IRQ1 handler: read the scancode and buffer printable characters.
 pub fn irq() {
     let code = unsafe { inb(DATA_PORT) };
+    handle_scancode(code);
+}
+
+/// Feed a scancode that arrived through a shared controller read.
+pub fn inject(code: u8) {
+    handle_scancode(code);
+}
+
+fn handle_scancode(code: u8) {
     if code & 0x80 != 0 {
         return; // key release
     }
@@ -132,11 +143,13 @@ pub fn irq() {
 
 /// Return the next buffered character, if any.
 pub fn read_char() -> Option<u8> {
-    let mut buffer = BUFFER.lock();
-    if buffer.head == buffer.tail {
-        return None;
-    }
-    let value = buffer.data[buffer.head];
-    buffer.head = (buffer.head + 1) % buffer.data.len();
-    Some(value)
+    crate::interrupt::without_interrupts(|| {
+        let mut buffer = BUFFER.lock();
+        if buffer.head == buffer.tail {
+            return None;
+        }
+        let value = buffer.data[buffer.head];
+        buffer.head = (buffer.head + 1) % buffer.data.len();
+        Some(value)
+    })
 }

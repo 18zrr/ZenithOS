@@ -19,6 +19,8 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+The suite reports **26 tests across 40 suites, 0 failures**.
+
 ## Build the applications
 
 ```bash
@@ -29,18 +31,38 @@ cargo test --workspace
 
 | Method | Command |
 |---|---|
-| QEMU PVH direct load | `cd kernel && make qemu` |
-| BIOS disk image | `./build_image.sh` then `qemu-system-x86_64 -drive format=raw,file=zenith.img -display none -serial stdio` |
-| UEFI disk image | `./build_uefi_image.sh` then the OVMF command printed by the script |
-| Bootable ISO | `./build_iso.sh` then `qemu-system-x86_64 -cdrom zenith.iso -boot d -display none -serial stdio` |
+| QEMU PVH direct load (text only) | `cd kernel && make qemu` |
+| BIOS disk image | `./build_image.sh` then `qemu-system-x86_64 -drive format=raw,file=zenith.img -serial stdio` |
+| UEFI disk image | `./build_uefi_image.sh` then the OVMF command printed by the script (use `-m 512M`) |
+| Bootable ISO | `./build_iso.sh` then `qemu-system-x86_64 -cdrom zenith.iso -boot d -serial stdio` |
 
-All four paths reach the interactive shell.
+All four paths reach the interactive shell. The BIOS, UEFI and ISO paths also
+bring up the graphical desktop; QEMU's direct PVH/multiboot load provides no
+linear framebuffer, so it stays text-only.
+
+UEFI was verified with 512 MiB of guest RAM. With 128 MiB the Limine loader
+reports `High memory allocator: Out of memory` before the kernel starts:
+
+```bash
+cp /usr/share/edk2/x64/OVMF_VARS.4m.fd /tmp/zenith-vars.fd
+qemu-system-x86_64 -m 512M \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd \
+  -drive if=pflash,format=raw,file=/tmp/zenith-vars.fd \
+  -drive format=raw,file=zenith-uefi.img -serial stdio
+```
 
 ## What you should see
 
-The verbose boot log goes to COM1 serial only. On screen, Zenith OS paints a
-clean desktop: a title bar with `ZENITH OS` and `v0.1.0`, a console area, and a
-dock at the bottom.
+The verbose boot log goes to COM1 serial only. On screen, Zenith OS shows a
+brief splash and then a Windows 11-inspired desktop: a blue gradient wallpaper,
+a centred taskbar with a Start button and pinned apps, and the Terminal window
+active. The serial log confirms the compositor with a line like:
+
+```
+[wm] compositor 1024x768, mouse=1
+```
+
+The terminal shows:
 
 ```
 Zenith OS v0.1.0 - interactive shell
@@ -62,8 +84,28 @@ data from implemented subsystems:
 - `version`, `about`, `echo <text>`, `uptime`, `clear`, `flip`
 
 Backspace edits the line; Up/Down recall history; Enter runs the command.
-F12 also cycles the display orientation. Type `install` for a five-step
-graphical installation wizard:
+The terminal only receives typing while its window is focused.
+
+## Desktop controls
+
+| Action | Input |
+|---|---|
+| Move the pointer | PS/2 mouse (USB mice are not supported) |
+| Focus / raise a window | Click it |
+| Move a window | Drag its title bar |
+| Resize a window | Drag the bottom-right grip |
+| Minimise / maximise / restore / close | Window title-bar buttons |
+| Restore a minimised app | Click its taskbar icon |
+| Open the Start menu | Click Start or press **F1** |
+| Search the Start menu | Type while it is open |
+| Choose a menu entry | Arrow keys, or click a tile |
+| Launch | **Enter**, or click the tile |
+| Close the Start menu | **Esc**, or click outside the panel |
+| Change accent colour | Settings window → accent swatch |
+| Cycle display orientation | **F12** |
+
+The Start menu's **Installer** entry (or typing `install` in the terminal)
+opens the five-step graphical installation wizard:
 
 ```
 1 Welcome   2 Disk   3 Confirm   4 Install   5 Done
@@ -71,7 +113,8 @@ graphical installation wizard:
 
 Use Up/Down to choose, Enter to continue, Backspace to go back, and Esc to quit.
 The wizard reads real ATA/Zenith FS state and reports failure honestly when no
-writable disk is present (for example on a CD-only boot).
+writable disk is present (for example on a CD-only boot). It is modal and
+restores the desktop when it closes.
 
 Full boot diagnostics remain available on serial (`-serial stdio`).
 

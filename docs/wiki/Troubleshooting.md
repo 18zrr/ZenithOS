@@ -2,14 +2,33 @@
 
 ## The desktop is rotated or mirrored
 
-Symptom: the dock appears at the top, icons/colours are reversed, or text reads
-backwards. This is a framebuffer orientation difference in the VM, not a text
-rendering bug.
+Symptom: the taskbar appears at the top, icons/colours are reversed, or text
+reads backwards. This is a framebuffer orientation difference in the VM, not a
+text rendering bug.
 
 Fix: **press F12 once** in the VM. The first press applies a 180° rotation;
 further presses cycle through mirror-X, flip-Y, and normal, printing the active
 mode each time. For a permanent setting, rebuild with
 `ZENITH_FB_FLIP=xy ./build_iso.sh`. See [Graphics](Graphics.md).
+
+## The mouse does not move the cursor
+
+- The driver is PS/2 only. USB mice are not supported because USB device
+  enumeration does not complete. Use QEMU's default PS/2 mouse, or pass an
+  explicit PS/2 mouse.
+- In QEMU, make sure the display is shown (drop `-display none`); a headless VM
+  still runs the desktop but you cannot interact with it.
+- Check the serial log for `[wm] compositor 1024x768, mouse=1`. `mouse=0` means
+  PS/2 initialisation failed.
+- If the pointer moves but clicks miss, remember the compositor runs at
+  1024×768; a scaled or rotated display changes where you must click. See
+  [Graphics](Graphics.md).
+
+## No graphical desktop (text shell only)
+
+The graphical desktop needs a Limine-provided linear framebuffer. It appears on
+the BIOS disk image, the UEFI disk image and the ISO. QEMU's direct PVH load
+(`make qemu`) has no framebuffer and intentionally stays text-only.
 
 ## Text does not appear on screen
 
@@ -59,6 +78,14 @@ unproven — see [Drivers](Drivers.md).
 
 UHCI controller and port detection work (a QEMU mouse is detected), but control
 transfers time out, so no device enumeration or HID driver exists. This is
-expected behaviour in this revision, not a misconfiguration.
+expected behaviour in this revision, not a misconfiguration. Mouse input is PS/2
+only.
+
+## UEFI boot stops in the Limine loader
+
+With too little guest RAM, the Limine loader prints
+`High memory allocator: Out of memory` before the kernel runs. UEFI was verified
+with **512 MiB**; start QEMU with `-m 512M`. See
+[Getting Started](Getting-Started.md).
 
 See also [Status](Status.md) for the verified feature baseline.

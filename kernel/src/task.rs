@@ -198,6 +198,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
             diagnostics::println("  clear     clear the screen");
             diagnostics::println("  flip      change display orientation");
             diagnostics::println("  install   graphical installation wizard");
+            diagnostics::println("F1 opens the Start menu; F12 changes display orientation.");
         }
         "sysinfo" => {
             diagnostics::println("Zenith OS v0.1.0 - system overview");
@@ -333,7 +334,12 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
         }
         "clear" => diagnostics::clear_screen(),
         "flip" => crate::framebuffer::cycle_orientation(),
-        "install" => crate::installer::run(),
+        "install" => {
+            crate::mouse::flush_events();
+            crate::installer::run();
+            crate::mouse::flush_events();
+            crate::wm::invalidate();
+        }
         other => {
             diagnostics::puts("unknown command: ");
             diagnostics::println(other);
@@ -355,18 +361,39 @@ fn shell_task() {
     let mut history = [[0u8; 128]; CAPACITY];
     let mut history_len = 0usize;
     let mut history_index = 0usize;
-    let mut extended = false;
 
     loop {
-        if let Some(scancode) = keyboard::take_raw() {
-            if scancode == 0xE0 {
-                extended = true;
-            } else if scancode == 0x58 && !extended {
-                crate::framebuffer::cycle_orientation(); // F12
-            } else {
-                // Arrow keys may arrive with or without the E0 prefix.
-                let key = scancode;
-                extended = false;
+        let raw = keyboard::take_raw();
+        let byte = keyboard::read_char();
+
+        // Global shortcuts are available regardless of which window is active.
+        if let Some(sc) = raw {
+            match sc {
+                0x3B => crate::wm::toggle_menu(), // F1
+                0x58 => crate::framebuffer::cycle_orientation(), // F12
+                _ => {}
+            }
+        }
+
+        // Mouse events drive the window manager.
+        if crate::wm::pump() == crate::wm::Action::Installer {
+            run_installer();
+            continue;
+        }
+
+        // While the Start menu is open it owns all keyboard input.
+        if crate::start_menu::is_open() {
+            if crate::wm::menu_key(raw, byte) == crate::wm::Action::Installer {
+                run_installer();
+            }
+            crate::wm::tick();
+            yield_now();
+            continue;
+        }
+
+        // Typing belongs to the terminal only while it has focus.
+        if crate::wm::terminal_focused() {
+            if let Some(key) = raw {
                 if key == 0x48 || key == 0x50 {
                     let load = match key {
                         0x48 if history_index > 0 => Some(history_index - 1), // Up
@@ -390,49 +417,60 @@ fn shell_task() {
                     }
                 }
             }
-        }
 
-        if let Some(byte) = keyboard::read_char() {
-            match byte {
-                b'\r' | b'\n' => {
-                    diagnostics::putc(b'\n');
-                    if length > 0 {
-                        let command = core::str::from_utf8(&line[..length]).unwrap_or("");
-                        let slot = if history_len < CAPACITY {
-                            let slot = history_len;
-                            history_len += 1;
-                            slot
-                        } else {
-                            for index in 0..CAPACITY - 1 {
-                                history[index] = history[index + 1];
-                            }
-                            CAPACITY - 1
-                        };
-                        history[slot] = [0u8; 128];
-                        history[slot][..length].copy_from_slice(&line[..length]);
-                        history_index = history_len;
+            if let Some(byte) = byte {
+                match byte {
+                    b'\r' | b'\n' => {
+                        diagnostics::putc(b'\n');
+                        if length > 0 {
+                            let command = core::str::from_utf8(&line[..length]).unwrap_or("");
+                            let slot = if history_len < CAPACITY {
+                                let slot = history_len;
+                                history_len += 1;
+                                slot
+                            } else {
+                                for index in 0..CAPACITY - 1 {
+                                    history[index] = history[index + 1];
+                                }
+                                CAPACITY - 1
+                            };
+                            history[slot] = [0u8; 128];
+                            history[slot][..length].copy_from_slice(&line[..length]);
+                            history_index = history_len;
 
-                        execute_command(command, &history, history_len);
-                        length = 0;
+                            execute_command(command, &history, history_len);
+                            length = 0;
+                        }
+                        diagnostics::puts("zenith> ");
                     }
-                    diagnostics::puts("zenith> ");
-                }
-                0x08 => {
-                    if length > 0 {
-                        length -= 1;
-                        diagnostics::puts("\x08 \x08");
+                    0x08 => {
+                        if length > 0 {
+                            length -= 1;
+                            diagnostics::puts("\x08 \x08");
+                        }
                     }
+                    other if length + 1 < line.len() => {
+                        line[length] = other;
+                        length += 1;
+                        diagnostics::putc(other);
+                    }
+                    _ => {}
                 }
-                other if length + 1 < line.len() => {
-                    line[length] = other;
-                    length += 1;
-                    diagnostics::putc(other);
-                }
-                _ => {}
             }
         }
+
+        crate::wm::tick();
         yield_now();
     }
+}
+
+/// Run the modal installer without letting stale mouse events leak into the
+/// desktop when it returns.
+fn run_installer() {
+    crate::mouse::flush_events();
+    crate::installer::run();
+    crate::mouse::flush_events();
+    crate::wm::invalidate();
 }
 
 /// Keeps the scheduler and NIC alive; tick logs go to COM1 only.

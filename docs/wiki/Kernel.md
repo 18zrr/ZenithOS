@@ -14,7 +14,11 @@ assembly entry points.
 | `interrupt.rs` | IDT, PIC, page-fault and exception reporting |
 | `timer.rs` | PIT at 100 Hz |
 | `keyboard.rs` | PS/2 scancodes, input buffer, raw scancode channel |
-| `task.rs` | Cooperative task manager, shell, heartbeat |
+| `mouse.rs` | PS/2 mouse on IRQ12, packet decoding, 128-event queue |
+| `rtc.rs` | CMOS real-time clock |
+| `start_menu.rs` | Start menu state, search filter and selection |
+| `wm.rs` | Compositor, window manager, taskbar and desktop input |
+| `task.rs` | Cooperative task manager, shell loop, heartbeat |
 | `io.rs` | Port I/O helpers |
 | `pci.rs` | PCI configuration-space enumeration |
 | `ata.rs` | ATA PIO sector reads/writes |
@@ -32,6 +36,9 @@ assembly entry points.
 
 `diagnostics::puts` writes to COM1 serial and to the on-screen console. The
 framebuffer console uses a scaled 8×8 font and clears each cell before drawing.
+After boot, `boot_complete()` switches the screen to the compositor in `wm.rs`;
+the shell text is drawn inside the Terminal window rather than directly to the
+framebuffer.
 
 ## Exceptions and interrupts
 
@@ -50,7 +57,8 @@ dispatcher for read/write/open/close. No user process uses it yet.
 - Scheduling is cooperative; no APIC preemption.
 - General demand paging is not implemented (one test page is).
 - e1000 RX is written but has never received a packet in QEMU.
-- USB control transfers do not complete, so no device enumeration.
+- USB control transfers do not complete, so no device enumeration or HID input.
+- The compositor is software-only at a fixed 1024×768.
 
 See [Scheduling](Scheduling.md), [Interrupts](Interrupts.md), and
 [Memory Management](Memory-Management.md).

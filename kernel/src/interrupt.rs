@@ -168,8 +168,10 @@ unsafe fn init_pic() {
     outb(0xA1, 0x02);
     outb(0x21, 0x01); // ICW4: 8086 mode
     outb(0xA1, 0x01);
-    outb(0x21, 0xFC); // unmask timer (IRQ0) and keyboard (IRQ1)
-    outb(0xA1, 0xFF);
+    // Unmask timer (IRQ0), keyboard (IRQ1), the slave cascade (IRQ2) and the
+    // PS/2 mouse (IRQ12). Everything else stays masked.
+    outb(0x21, 0xF8);
+    outb(0xA1, 0xEF);
 }
 
 /// Enable maskable interrupts with `sti`.
@@ -180,6 +182,24 @@ pub fn enable_interrupts() {
 /// Disable maskable interrupts with `cli`.
 pub fn disable_interrupts() {
     unsafe { core::arch::asm!("cli", options(nostack, preserves_flags)); }
+}
+
+/// Run `f` with interrupts masked when they were enabled. This makes shared
+/// buffers safe to touch from task context: an IRQ cannot preempt the task
+/// while it holds a spinlock that the IRQ handler also needs.
+pub fn without_interrupts<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let enabled = interrupts_enabled();
+    if enabled {
+        disable_interrupts();
+    }
+    let result = f();
+    if enabled {
+        enable_interrupts();
+    }
+    result
 }
 
 const EXCEPTION_NAMES: [&str; 32] = [
@@ -200,15 +220,17 @@ pub extern "C" fn rust_interrupt_handler(frame: &mut InterruptFrame) {
         0..=31 => exception(frame),
         32 => timer::tick(),
         33 => keyboard::irq(),
+        44 => crate::mouse::irq(),
         _ => {}
     }
 
     if (32..48).contains(&frame.vector) {
         unsafe {
-            outb(0x20, 0x20); // master EOI
+            // Acknowledge the slave first when the IRQ came through it.
             if frame.vector >= 40 {
-                outb(0xA0, 0x20); // slave EOI
+                outb(0xA0, 0x20);
             }
+            outb(0x20, 0x20);
         }
     }
 }

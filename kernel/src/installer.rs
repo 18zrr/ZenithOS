@@ -169,6 +169,14 @@ fn render(step: usize, selection: usize, progress: usize, result: Option<bool>) 
 
 /// Run the installer wizard to completion, then return to the shell.
 pub fn run() {
+    crate::mouse::flush_events();
+    run_inner();
+    crate::mouse::flush_events();
+    crate::wm::invalidate();
+    crate::wm::render_now();
+}
+
+fn run_inner() {
     if fb::dimensions().0 == 0 {
         crate::diagnostics::println("installer: no framebuffer available");
         return;

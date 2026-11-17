@@ -20,8 +20,9 @@ see [Status](Status.md) for the verified baseline.
    mount layer; currently mounting is manual ([Filesystems](Filesystems.md)).
 6. **Syscall-driven userland** — run applications as OS processes using the
    syscall dispatcher instead of host harnesses ([Userland](Userland.md)).
-7. **Zenith UI rendering** — wire the UI data model to the framebuffer and add
-   a window manager; today only a static desktop is drawn ([Graphics](Graphics.md)).
+7. **Richer window management** — Alt-Tab switching, window snapping, animations,
+   HiDPI scaling and multi-monitor support on top of the existing compositor
+   ([Graphics](Graphics.md)).
 
 ## Longer term / out of scope for v0.1.x
 

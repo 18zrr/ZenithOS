@@ -28,8 +28,8 @@
 
 ```
 cargo build --workspace   → clean build
-cargo test --workspace    → 23 tests / 40 suites / 0 failures
-Boot paths: PVH direct load, Limine BIOS image, Limine UEFI image, bootable ISO
+cargo test --workspace    → 26 tests / 40 suites / 0 failures
+Boot paths: PVH direct load (text), Limine BIOS image, Limine UEFI image, bootable ISO
 ```
 
 ## Source layout
@@ -38,9 +38,9 @@ Boot paths: PVH direct load, Limine BIOS image, Limine UEFI image, bootable ISO
 |---|---|
 | Kernel | `kernel/src/` |
 | Boot configurations | `boot/` |
-| Drivers | `drivers/` and `kernel/src/{pci,ata,acpi,e1000,net,usb,nvidia}.rs` |
+| Drivers | `drivers/` and `kernel/src/{pci,ata,acpi,e1000,net,usb,nvidia,mouse,keyboard}.rs` |
 | Filesystems | `filesystem/zenith-fs/` |
-| GUI data model | `gui/zenith-ui/` |
+| GUI model | `gui/zenith-ui/` (host `Surface`/theme; the live desktop is `kernel/src/wm.rs`) |
 | Applications | `userland/` |
 | Tooling | `tools/` |
 
@@ -48,7 +48,7 @@ Boot paths: PVH direct load, Limine BIOS image, Limine UEFI image, bootable ISO
 
 - Describe only implemented, verified behaviour in documentation.
 - Do not claim unfinished features work (RX, USB enumeration, APIC preemption,
-  general paging, VFS mount table, UI rendering, native GPU driver).
+  general paging, VFS mount table, syscall-driven userland, native GPU driver).
 - Ask before major architectural changes; do not remove existing functionality
   without approval.
 

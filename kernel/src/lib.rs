@@ -28,12 +28,16 @@ pub mod page_table;
 pub mod paging;
 pub mod pci;
 pub mod process;
+pub mod rtc;
+pub mod start_menu;
 pub mod sync;
 pub mod syscalls;
 pub mod task;
 pub mod timer;
 pub mod usb;
 pub mod vga;
+pub mod wm;
+pub mod mouse;
 
 use core::panic::PanicInfo;
 
@@ -80,6 +84,9 @@ pub extern "C" fn kernel_main() -> ! {
 
     framebuffer::splash_step("Setting up interrupts...", 32);
     interrupt::init();
+    // The mouse is programmed with interrupts still masked, then IRQ12 is
+    // unmasked along with the timer and keyboard.
+    mouse::init();
     timer::init();
     // Driver delays rely on the PIT tick counter.
     interrupt::enable_interrupts();
@@ -98,6 +105,7 @@ pub extern "C" fn kernel_main() -> ! {
     ata::probe();
     syscalls::init();
 
+    wm::init();
     framebuffer::splash_step("Starting desktop...", 100);
     // Hold the finished splash briefly so the boot screen is actually seen.
     let splash_end = timer::ticks() + 80;
@@ -123,8 +131,52 @@ pub unsafe extern "C" fn memcpy(
 ) -> *mut core::ffi::c_void {
     let destination = destination as *mut u8;
     let source = source as *const u8;
-    for index in 0..count {
+    // Word-sized copies keep full-screen compositor blits fast.
+    let mut index = 0;
+    while index + 8 <= count {
+        let word = core::ptr::read_unaligned(source.add(index) as *const u64);
+        core::ptr::write_unaligned(destination.add(index) as *mut u64, word);
+        index += 8;
+    }
+    while index < count {
         *destination.add(index) = *source.add(index);
+        index += 1;
+    }
+    destination as *mut core::ffi::c_void
+}
+
+/// Overlap-safe copy shim (the compiler emits `memmove` for slice shifts).
+#[no_mangle]
+pub unsafe extern "C" fn memmove(
+    destination: *mut core::ffi::c_void,
+    source: *const core::ffi::c_void,
+    count: usize,
+) -> *mut core::ffi::c_void {
+    let destination = destination as *mut u8;
+    let source = source as *const u8;
+    if (destination as usize) <= (source as usize) {
+        let mut index = 0;
+        while index + 8 <= count {
+            let word = core::ptr::read_unaligned(source.add(index) as *const u64);
+            core::ptr::write_unaligned(destination.add(index) as *mut u64, word);
+            index += 8;
+        }
+        while index < count {
+            *destination.add(index) = *source.add(index);
+            index += 1;
+        }
+    } else {
+        // Copy backwards so an overlapping source is not clobbered.
+        let mut index = count;
+        while index >= 8 {
+            index -= 8;
+            let word = core::ptr::read_unaligned(source.add(index) as *const u64);
+            core::ptr::write_unaligned(destination.add(index) as *mut u64, word);
+        }
+        while index > 0 {
+            index -= 1;
+            *destination.add(index) = *source.add(index);
+        }
     }
     destination as *mut core::ffi::c_void
 }
@@ -154,8 +206,16 @@ pub unsafe extern "C" fn memset(
     count: usize,
 ) -> *mut core::ffi::c_void {
     let destination = destination as *mut u8;
-    for index in 0..count {
-        *destination.add(index) = value as u8;
+    let byte = value as u8;
+    let word = u64::from_ne_bytes([byte; 8]);
+    let mut index = 0;
+    while index + 8 <= count {
+        core::ptr::write_unaligned(destination.add(index) as *mut u64, word);
+        index += 8;
+    }
+    while index < count {
+        *destination.add(index) = byte;
+        index += 1;
     }
     destination as *mut core::ffi::c_void
 }

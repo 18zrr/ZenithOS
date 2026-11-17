@@ -13,6 +13,8 @@ skeletons; `kernel/src/` contains the hardware drivers actually used at boot.
 | e1000 | `e1000.rs` | EEPROM MAC, link status, descriptor rings, TX; ARP/DHCP/UDP/TCP frames built |
 | USB (UHCI) | `usb.rs` | Controller reset, frame list, queue head, port reset/status; QEMU mouse detected |
 | NVIDIA | `nvidia.rs` | PCI/BAR/MMIO boot-register probing |
+| PS/2 keyboard | `keyboard.rs` | IRQ1 scancode set 1, ASCII translation, raw-scancode ring; drives the shell and Start menu |
+| PS/2 mouse | `mouse.rs` | IRQ12 three-byte packet decoding, 3 buttons, clamping, 128-event queue; drives the window manager |
 
 ## Driver framework
 
@@ -26,8 +28,8 @@ modules talk to real hardware.
 - e1000 receive path has not received a packet in QEMU; end-to-end networking
   is unproven.
 - USB control transfers time out under QEMU; no device enumeration or HID class
-  driver.
-- No native GPU driver; `nvidia.rs` only probes.
+  driver. Mouse input is PS/2 only, so USB mice do not work.
+- No native GPU driver; `nvidia.rs` only probes. Compositing is software.
 - EHCI/xHCI controllers are detected by class but not initialised.
 
 See [Filesystems](Filesystems.md) for storage-backed drivers' consumers.

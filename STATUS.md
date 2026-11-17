@@ -2,20 +2,50 @@
 
 ## Verified working (this revision)
 
-- **Workspace**: `cargo build --workspace` and `cargo test --workspace` both
-  pass (13 unit tests, 0 failures).
-- **Two boot paths**:
-  - QEMU PVH direct load: `cd kernel && make qemu`.
+- **Workspace**: `cargo build --workspace` is clean and
+  `cargo test --workspace` reports **26 tests / 40 suites / 0 failures**.
+- **Boot paths**:
+  - QEMU PVH direct load: `cd kernel && make qemu` reaches the interactive text
+    shell. This path has no linear framebuffer, so it stays text-only.
   - Limine BIOS image: `./build_image.sh` produces `zenith.img` (MBR + FAT16,
-    `limine-bios.sys`, `limine.conf`, native Limine kernel).
+    `limine-bios.sys`, `limine.conf`, native Limine kernel). Verified to reach
+    the graphical desktop and log `[wm] compositor 1024x768, mouse=1`.
   - Limine UEFI image: `./build_uefi_image.sh` produces `zenith-uefi.img` with an
     EFI System Partition containing `BOOTX64.EFI` under `/EFI/BOOT/`. Verified
-    with OVMF; the script prints the exact QEMU command.
+    with OVMF at **512 MiB** of guest RAM; at 128 MiB the Limine loader reports
+    `High memory allocator: Out of memory` before the kernel starts.
+  - Bootable ISO: `./build_iso.sh` produces the 16 MiB `zenith.iso`, verified to
+    reach the graphical desktop.
+- **Desktop and window manager** (`kernel/src/wm.rs`):
+  - Software compositor: cached gradient wallpaper, full-screen RAM frame
+    (about 6 MiB at 1024×768) blitted to the framebuffer; dirty-only redraws
+    capped at roughly 50 Hz.
+  - Window manager: focus/raise on click, title-bar dragging, bottom-right
+    resize grip, minimise, maximise/restore, close, rounded corners, drop
+    shadows and per-app title icons.
+  - Built-in windows: Terminal, System Monitor, Settings and About.
+  - Taskbar: centred Start button, four pinned app icons with running/focused
+    indicators and hover feedback, link-status indicator, and a CMOS real-time
+    clock that repaints when the minute changes without input.
+  - Start menu: click or **F1**, type-to-filter search, arrow-key and mouse
+    selection, Enter to launch, Esc or outside click to close, plus an Installer
+    entry that opens the graphical wizard.
+  - Settings accent swatches recolour window accents, the Start button, taskbar
+    indicators, headings and the terminal caret live.
+  - Focus-aware input: the terminal receives typing only while it is the active
+    window; the Start menu owns the keyboard while open.
+  - Installer remains a modal direct-to-framebuffer surface: mouse events are
+    flushed around it and the desktop is restored when it exits.
+- **Mouse**: PS/2 mouse on IRQ12 (`kernel/src/mouse.rs`) with three-byte packet
+  assembly, three buttons, screen clamping and a 128-event queue drained by the
+  shell loop. Cursor movement, clicks, dragging and resizing were verified by
+  QEMU monitor injection.
 - **Kernel subsystems**:
   - 64-bit trampoline: GDT, PAE, SSEFXSR, EFER.LME, identity page tables.
   - COM1 serial console plus 80x25 VGA text console with scrolling.
   - IDT with 48 handlers, PIC remapping, PIT at 100 Hz with EOI.
-  - PS/2 keyboard (IRQ1) with scancode translation and input buffer.
+  - PS/2 keyboard (IRQ1) with scancode translation, input buffer and a raw
+    scancode ring used for F1/F12 handling.
   - Page-fault handler reporting CR2/error code/RIP.
   - Syscall MSRs (`STAR`, `LSTAR`, `FMASK`) and a basic dispatcher
     (read/write/open/close).
@@ -34,25 +64,25 @@
     that increments across real reboots (`1 → 2 → 3 …`). FAT32 and NTFS read
     drivers mount test partitions and read `HELLO.TXT` from disk. The ext4
     driver is validated against a real `mkfs.ext4` image.
-  - ACPI RSDP
-    discovery from BIOS/Multiboot2/Limine, and e1000 detection with EEPROM MAC
-    and link-status reads (verified: `52:54:00:12:34:56`, link up).
-  - Limine memory-map parsing, a 1024x768x32 linear framebuffer desktop, and
-    a bitmap-font text console that mirrors diagnostics on screen.
+  - ACPI RSDP discovery from BIOS/Multiboot2/Limine, and e1000 detection with
+    EEPROM MAC and link-status reads (verified: `52:54:00:12:34:56`, link up).
+  - Limine memory-map parsing, a 1024x768x32 linear framebuffer, a bitmap-font
+    text console, and the compositing desktop described above.
   - e1000 RX polling with ARP request/reply handling and an IPv4 network stack
     (DHCP DISCOVER/REQUEST, UDP echo on port 7, TCP SYN/SYN-ACK and echo).
-  - UHCI control-transfer
-    support is present but device enumeration is not yet completing.
-  - NVIDIA GPU detection/BAR/MMIO probing framework (`nvidia.rs`).
+  - UHCI control-transfer support is present but device enumeration is not yet
+    completing. NVIDIA GPU detection/BAR/MMIO probing framework (`nvidia.rs`).
   - e1000 RX/TX descriptor rings; an ARP request is transmitted successfully
     (TDT advances). UHCI USB controller init (frame list, queue head, port
     reset/status); a QEMU USB mouse is detected with status `0x87`.
   - Limine native protocol requests (framebuffer, HHDM, RSDP, memory map) and
     Multiboot2 fallback information.
-  - Cooperative scheduler with per-task stacks; interactive echo shell and
-    periodic heartbeat task.
+  - Cooperative scheduler with per-task stacks; interactive shell and periodic
+    heartbeat task.
 - **Userland / libraries / drivers / filesystem / GUI**: all crates compile;
-  logic with meaningful behavior is unit-tested.
+  logic with meaningful behavior is unit-tested. The live desktop is kernel-side
+  (`kernel/src/wm.rs`); the `zenith-ui` crate remains a host `Surface`/theme
+  model used by tests and demos.
 
 ## Known limitations
 
@@ -63,19 +93,27 @@
   recovery for arbitrary faults are not implemented.
 - Serial/VGA, PIC/PIT/keyboard, PCI, ATA, ACPI, e1000 and UHCI touch real
   hardware. e1000 RX awaits live-traffic testing; USB GET_DESCRIPTOR transfers
-  time out, so device enumeration and HID drivers are still pending.
+  time out, so device enumeration and HID drivers are still pending. Mouse input
+  is PS/2 only.
 - FAT32, NTFS and ext4 are read-only. Zenith FS has no directory permissions
   and only single-indirect blocks. NTFS resolves paths by scanning the MFT
   rather than parsing $INDEX trees.
 - Framebuffer graphics are provided by Limine (VBE/GOP); there is no native GPU
-  driver. `nvidia.rs` detects NVIDIA GPUs and reads boot registers only — GSP
-  firmware, engine programming and mode setting are not implemented. Zenith UI
-  remains a data model.
+  driver and all compositing is software at 1024×768 with no HiDPI scaling,
+  multi-monitor support, window snapping or Alt-Tab switcher. `nvidia.rs`
+  detects NVIDIA GPUs and reads boot registers only — GSP firmware, engine
+  programming and mode setting are not implemented.
+- The graphical desktop requires a Limine framebuffer; the direct PVH path is
+  text-only.
 - Userland apps run as host harnesses, not OS processes; no syscall-using apps.
 
 ## Next steps
 
-1. Fine-grained paging, page-fault recovery, and APIC-based preemption.
-2. Complete USB device enumeration and a HID class driver.
-3. Syscall-backed userland processes and Zenith UI rendering on the framebuffer.
-4. Native GPU mode setting (requires hardware/firmware not available here).
+1. Generalise paging, page-fault recovery, and APIC-based preemption.
+2. Complete USB device enumeration and a HID class driver so USB mice work.
+3. Syscall-backed userland processes and wiring the `zenith-ui` crate to the
+   live compositor.
+4. Richer window management (Alt-Tab, snapping, animations, HiDPI,
+   multi-monitor).
+5. Validate e1000 RX with live traffic.
+6. Native GPU mode setting (requires hardware/firmware not available here).

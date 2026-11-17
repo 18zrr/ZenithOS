@@ -28,3 +28,7 @@ opt-level = 'z'
 lto = true
 codegen-units = 1
 panic = 'abort'
+
+# The compositor is pixel-bound; keep it fast while other crates stay small.
+[profile.release.package.zenith-kernel]
+opt-level = 2

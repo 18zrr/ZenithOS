@@ -8,7 +8,7 @@ profile uses size optimisation and `panic = "abort"`.
 
 ```bash
 cargo build --workspace
-cargo test --workspace     # 23 tests / 40 suites / 0 failures
+cargo test --workspace     # 26 tests / 40 suites / 0 failures
 ```
 
 ## Top-level scripts

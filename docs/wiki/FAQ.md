@@ -16,12 +16,13 @@ boot entry points. See [Development Guide](Development-Guide.md).
 
 ```bash
 cargo build --workspace && cargo test --workspace
-cd kernel && make qemu          # PVH direct load
 ./build_iso.sh
-qemu-system-x86_64 -cdrom zenith.iso -boot d -display none -serial stdio
+qemu-system-x86_64 -cdrom zenith.iso -boot d -serial stdio
 ```
 
-See [Getting Started](Getting-Started.md).
+Omitting `-display none` shows the graphical desktop. `cd kernel && make qemu`
+(PVH direct load) boots the text shell only, because that path has no linear
+framebuffer. See [Getting Started](Getting-Started.md).
 
 ## Why is the ISO 16 MiB?
 
@@ -44,8 +45,17 @@ networking is unproven. See [Drivers](Drivers.md).
 ## Do USB devices work?
 
 UHCI controller and port detection work, and a QEMU mouse is detected, but
-control transfers time out so device enumeration does not complete. See
+control transfers time out so device enumeration does not complete. USB mice
+therefore do not move the cursor; mouse input is PS/2 only. See
 [Drivers](Drivers.md).
+
+## Do the mouse and window manager work?
+
+Yes on the Limine BIOS, UEFI and ISO boot paths. The desktop is a software
+compositor: a PS/2 mouse on IRQ12 moves the cursor, and windows can be focused,
+dragged, resized, minimised, maximised, restored and closed. The Start menu
+opens with **F1** or a click, and supports typing to search. USB mice are not
+supported. See [Graphics](Graphics.md).
 
 ## Can I run the bundled apps inside the OS?
 
@@ -53,14 +63,16 @@ Not yet. The seven application libraries run as host harnesses; there is no
 syscall-driven process model. The boot-time shell is a kernel task. See
 [Userland](Userland.md).
 
-## Is there a GPU driver or window manager?
+## Is there a GPU driver?
 
-No. Graphics come from Limine's VBE/GOP framebuffer. `nvidia.rs` only detects
-GPUs and reads boot registers; Zenith UI is a data model. See
+No. Graphics come from Limine's VBE/GOP framebuffer and all composition is
+software. `nvidia.rs` only detects GPUs and reads boot registers. There is a
+window manager, but it is CPU-drawn, not GPU-accelerated. See
 [Graphics](Graphics.md).
 
 ## What is the current test status?
 
-`cargo build --workspace` is clean and `cargo test --workspace` reports 23 tests
-/ 40 suites / 0 failures. All four boot paths reach the shell. See
+`cargo build --workspace` is clean and `cargo test --workspace` reports 26 tests
+/ 40 suites / 0 failures. The BIOS image, UEFI image and ISO reach the graphical
+desktop; the direct PVH load reaches the text shell. See
 [Status](Status.md) and [Release Notes](Release-Notes.md).
