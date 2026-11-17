@@ -41,6 +41,13 @@ limine_memmap_request:
 .quad 0
 .quad 0
 
+.global limine_kernel_address_request
+limine_kernel_address_request:
+.quad 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b
+.quad 0x71ba76863cc55f63, 0xb2644a48c516a487
+.quad 0
+.quad 0
+
 .section .limine_requests_end,"a",@progbits
 .balign 8
 .quad 0xadc0e0531bb10d03, 0x9572709f31764c62

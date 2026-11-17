@@ -49,6 +49,7 @@ pub struct MouseEvent {
 
 struct Mouse {
     present: bool,
+    usb: bool,
     packet: [u8; 3],
     packet_index: usize,
     x: i32,
@@ -65,6 +66,7 @@ impl Mouse {
     const fn new() -> Self {
         Mouse {
             present: false,
+            usb: false,
             packet: [0; 3],
             packet_index: 0,
             x: DEFAULT_WIDTH / 2,
@@ -137,11 +139,17 @@ impl Mouse {
 
         let dx = self.packet[1] as i32 - if flags & 0x10 != 0 { 256 } else { 0 };
         let dy = self.packet[2] as i32 - if flags & 0x20 != 0 { 256 } else { 0 };
+        // PS/2 reports positive Y upwards; the screen grows downwards.
+        self.apply(self.button_mask(flags), dx, -dy);
+    }
+
+    /// Apply a decoded report. USB HID and PS/2 share the button-bit layout,
+    /// but USB reports positive Y downwards.
+    fn apply(&mut self, buttons: u8, dx: i32, dy: i32) {
         self.x += dx;
-        self.y -= dy; // PS/2 reports positive Y upwards
+        self.y += dy;
         self.clamp();
 
-        let buttons = self.button_mask(flags);
         let pressed = buttons & !self.buttons;
         let released = self.buttons & !buttons;
         self.buttons = buttons;
@@ -157,6 +165,17 @@ impl Mouse {
                 self.push(EVENT_BUTTON_UP, button);
             }
         }
+    }
+
+    /// Decode a USB HID boot-mouse report (buttons, dx, dy, optional wheel).
+    fn usb_report(&mut self, report: &[u8], length: usize) {
+        if length < 3 || report.len() < 3 {
+            return;
+        }
+        let buttons = self.button_mask(report[0]);
+        let dx = report[1] as i8 as i32;
+        let dy = report[2] as i8 as i32;
+        self.apply(buttons, dx, dy);
     }
 }
 
@@ -305,9 +324,44 @@ pub fn buttons() -> u8 {
     crate::interrupt::without_interrupts(|| MOUSE.lock().buttons)
 }
 
-/// Whether a PS/2 mouse was detected.
+/// Whether any pointing device (PS/2 or USB) was detected.
 pub fn present() -> bool {
-    crate::interrupt::without_interrupts(|| MOUSE.lock().present)
+    crate::interrupt::without_interrupts(|| {
+        let mouse = MOUSE.lock();
+        mouse.present || mouse.usb
+    })
+}
+
+/// Mark a USB HID mouse as ready. Its reports share the window-manager queue.
+pub fn usb_ready() {
+    crate::interrupt::without_interrupts(|| {
+        MOUSE.lock().usb = true;
+    });
+}
+
+/// Whether a USB HID mouse is active.
+pub fn usb_present() -> bool {
+    crate::interrupt::without_interrupts(|| MOUSE.lock().usb)
+}
+
+/// Human-readable pointing-device source for the System Monitor window.
+pub fn source() -> &'static str {
+    crate::interrupt::without_interrupts(|| {
+        let mouse = MOUSE.lock();
+        match (mouse.usb, mouse.present) {
+            (true, true) => "USB HID + PS/2",
+            (true, false) => "USB HID, 3-button",
+            (false, true) => "PS/2, 3-button",
+            (false, false) => "not detected",
+        }
+    })
+}
+
+/// Feed a USB HID boot-mouse report into the shared input queue.
+pub fn usb_report(report: &[u8], length: usize) {
+    crate::interrupt::without_interrupts(|| {
+        MOUSE.lock().usb_report(report, length);
+    });
 }
 
 /// Remove the next queued event.

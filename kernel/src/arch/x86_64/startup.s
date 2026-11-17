@@ -122,10 +122,12 @@ mb2_valid:    .long 0
 .global limine_rsdp_request
 .global limine_memmap_request
 .global limine_hhdm_request
+.global limine_kernel_address_request
 limine_framebuffer_request: .quad 0,0,0,0,0,0
 limine_rsdp_request:        .quad 0,0,0,0,0,0
 limine_memmap_request:      .quad 0,0,0,0,0,0
 limine_hhdm_request:        .quad 0,0,0,0,0,0
+limine_kernel_address_request: .quad 0,0,0,0,0,0
 .balign 2
 .global limine_cs
 limine_cs: .word 0x18

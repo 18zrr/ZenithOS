@@ -1382,7 +1382,7 @@ impl Wm {
 
         let mut value = TextBuffer::new();
         if mouse::present() {
-            value.push_str("PS/2 @ ");
+            value.push_str(if mouse::usb_present() { "USB HID @ " } else { "PS/2 @ " });
             value.push_signed(mouse_x);
             value.push(b',');
             value.push_signed(mouse_y);
@@ -1518,7 +1518,7 @@ impl Wm {
             y + 284,
             max_x,
             "Mouse",
-            if mouse::present() { "PS/2, 3-button" } else { "not detected" },
+            if mouse::present() { mouse::source() } else { "not detected" },
         );
         self.monitor_row(frame, x, y + 312, max_x, "Keyboard", "PS/2 scancode set 1");
     }

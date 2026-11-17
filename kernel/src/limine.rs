@@ -9,6 +9,7 @@ extern "C" {
     static limine_rsdp_request: [u64; 6];
     static limine_memmap_request: [u64; 6];
     static limine_hhdm_request: [u64; 6];
+    static limine_kernel_address_request: [u64; 6];
     static limine_cs: u16;
 }
 
@@ -51,6 +52,13 @@ pub struct LimineRsdpResponse {
 pub struct LimineHhdmResponse {
     pub revision: u64,
     pub offset: u64,
+}
+
+#[repr(C)]
+pub struct LimineKernelAddressResponse {
+    pub revision: u64,
+    pub physical_base: u64,
+    pub virtual_base: u64,
 }
 
 #[repr(C)]
@@ -152,25 +160,36 @@ pub fn hhdm_offset() -> u64 {
         .unwrap_or(0)
 }
 
+/// Physical and virtual base addresses of the loaded kernel image.
+pub fn kernel_address() -> Option<(u64, u64)> {
+    let response: &LimineKernelAddressResponse =
+        unsafe { response(&limine_kernel_address_request) }?;
+    if response.physical_base == 0 || response.virtual_base == 0 {
+        return None;
+    }
+    Some((response.physical_base, response.virtual_base))
+}
+
 /// Convert a kernel virtual address to its physical address under Limine.
 ///
-/// Kernel statics live in the higher half (linked at 0xFFFFFFFF80000000,
-/// loaded at 0x100000), while bootloader-provided buffers live in the HHDM.
+/// Limine may load the kernel at an arbitrary physical base (it is not
+/// guaranteed to honour the ELF physical address), so use the kernel address
+/// response instead of assuming 0x100000. Buffers in the HHDM are converted
+/// through the HHDM offset.
 pub fn physical(address: usize) -> u64 {
     if !is_active() {
         return address as u64;
     }
-    const HIGHER_HALF: usize = 0xFFFF_FFFF_8000_0000;
-    const KERNEL_PHYSICAL: usize = 0x10_0000;
-    if address >= HIGHER_HALF {
-        (address - HIGHER_HALF + KERNEL_PHYSICAL) as u64
-    } else {
-        let offset = hhdm_offset() as usize;
-        if offset != 0 && address >= offset {
-            (address - offset) as u64
-        } else {
-            address as u64
+    if let Some((physical_base, virtual_base)) = kernel_address() {
+        if address as u64 >= virtual_base {
+            return physical_base + (address as u64 - virtual_base);
         }
+    }
+    let offset = hhdm_offset() as usize;
+    if offset != 0 && address >= offset {
+        (address - offset) as u64
+    } else {
+        address as u64
     }
 }
 

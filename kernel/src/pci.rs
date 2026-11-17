@@ -1,7 +1,7 @@
 //! PCI configuration-space enumeration (I/O ports 0xCF8/0xCFC).
 
 use crate::diagnostics;
-use crate::io::{inl, outl};
+use crate::io::{inl, inw, outl, outw};
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
@@ -29,6 +29,32 @@ pub fn write(bus: u8, slot: u8, function: u8, offset: u8, value: u32) {
     unsafe {
         outl(CONFIG_ADDRESS, address);
         outl(CONFIG_DATA, value);
+    }
+}
+
+/// Read a 16-bit value from a device's configuration space.
+pub fn read16(bus: u8, slot: u8, function: u8, offset: u8) -> u16 {
+    let address = 0x8000_0000
+        | ((bus as u32) << 16)
+        | ((slot as u32) << 11)
+        | ((function as u32) << 8)
+        | (offset as u32 & 0xFC);
+    unsafe {
+        outl(CONFIG_ADDRESS, address);
+        inw(CONFIG_DATA + (offset as u16 & 2))
+    }
+}
+
+/// Write a 16-bit value to a device's configuration space.
+pub fn write16(bus: u8, slot: u8, function: u8, offset: u8, value: u16) {
+    let address = 0x8000_0000
+        | ((bus as u32) << 16)
+        | ((slot as u32) << 11)
+        | ((function as u32) << 8)
+        | (offset as u32 & 0xFC);
+    unsafe {
+        outl(CONFIG_ADDRESS, address);
+        outw(CONFIG_DATA + (offset as u16 & 2), value);
     }
 }
 

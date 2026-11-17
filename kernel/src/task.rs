@@ -375,6 +375,9 @@ fn shell_task() {
             }
         }
 
+        // USB HID reports are polled from the same task as PS/2 input.
+        crate::usb::poll();
+
         // Mouse events drive the window manager.
         if crate::wm::pump() == crate::wm::Action::Installer {
             run_installer();
