@@ -23,6 +23,39 @@ pub fn init() {
     vga::clear();
 }
 
+/// Write a string to COM1 only (not the on-screen consoles).
+pub fn serial_puts(message: &str) {
+    for &byte in message.as_bytes() {
+        if byte == b'\n' {
+            putc(b'\r');
+        }
+        putc(byte);
+    }
+}
+
+/// Print a u64 as hexadecimal to COM1 only.
+pub fn serial_put_hex(value: u64) {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut buffer = [0u8; 16];
+    for i in 0..16 {
+        buffer[i] = DIGITS[((value >> ((15 - i) * 4)) & 0xF) as usize];
+    }
+    let mut start = 0;
+    while start < 15 && buffer[start] == b'0' {
+        start += 1;
+    }
+    serial_puts("0x");
+    for &byte in &buffer[start..] {
+        putc(byte);
+    }
+}
+
+/// Clear the visible consoles and repaint the desktop chrome.
+pub fn clear_screen() {
+    vga::clear();
+    crate::framebuffer::clear_screen();
+}
+
 /// Write one byte to COM1, waiting for room in the transmit FIFO.
 pub fn putc(byte: u8) {
     unsafe {
@@ -72,6 +105,29 @@ pub fn put_hex(value: u64) {
     vga::puts("0x");
     for &byte in &buffer[start..] {
         vga::putc(byte);
+    }
+}
+
+/// Print a u64 in decimal.
+pub fn put_dec(value: u64) {
+    if value == 0 {
+        putc(b'0');
+        vga::putc(b'0');
+        crate::framebuffer::putc(b'0');
+        return;
+    }
+    let mut buffer = [0u8; 20];
+    let mut remaining = value;
+    let mut start = buffer.len();
+    while remaining > 0 {
+        start -= 1;
+        buffer[start] = b'0' + (remaining % 10) as u8;
+        remaining /= 10;
+    }
+    for &byte in &buffer[start..] {
+        putc(byte);
+        vga::putc(byte);
+        crate::framebuffer::putc(byte);
     }
 }
 

@@ -20,6 +20,25 @@ docs/           Documentation
 
 All crates are members of one Cargo workspace rooted at `Cargo.toml`.
 
+## Interactive shell
+
+The boot log goes to COM1 serial only; the screen shows a clean desktop with a
+title bar, a console area, and a dock. At the `zenith> ` prompt, type `help` to
+see the available commands:
+
+```
+help      show this list
+version   show OS version
+about     about Zenith OS
+echo      print text
+uptime    seconds since boot
+clear     clear the screen
+flip      change display orientation
+```
+
+The shell supports line editing (Backspace). F12 also cycles display
+orientation.
+
 ## Current status (verified)
 
 - `cargo build --workspace` and `cargo test --workspace` pass (13 zenith-fs tests).

@@ -15,14 +15,21 @@ BIOS, GOP on UEFI). There is no native GPU driver.
 
 ## Desktop
 
-`draw_desktop()` renders a minimal desktop into the framebuffer:
+`draw_desktop()` renders the window chrome into the framebuffer:
 
-- solid background,
-- a top bar,
-- a simple window,
-- a centred dock with seven coloured icons.
+- a dark background,
+- a **title bar** with the `ZENITH OS` name and `v0.1.0` version, an accent
+  stripe, and a separator line,
+- a **console area** between the header and dock, with 80-style columns and
+  scrollable text,
+- a **centred dock** at the bottom with six coloured icons.
 
-This is a static drawing, not a window manager. Zenith UI is currently a data
+The verbose boot log is suppressed on screen: `boot_complete()` paints the
+chrome and enables console output only after all subsystems are ready, so the
+screen opens on a clean shell instead of debug spam. Full logs still go to COM1
+serial.
+
+This is static drawing, not a window manager. Zenith UI is currently a data
 model only (see [Userland](Userland.md)), so no UI elements are wired to the
 framebuffer beyond this desktop and text console.
 

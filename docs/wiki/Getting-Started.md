@@ -38,16 +38,22 @@ All four paths reach the interactive shell.
 
 ## What you should see
 
+The verbose boot log goes to COM1 serial only. On screen, Zenith OS paints a
+clean desktop: a title bar with `ZENITH OS` and `v0.1.0`, a console area, and a
+dock at the bottom.
+
 ```
-Zenith OS kernel initialized successfully!
-[debug] Limine linear framebuffer detected
-...
-Zenith OS: starting scheduler...
-[shell] ready - type to echo, backspace to delete
+Zenith OS v0.1.0 - interactive shell
+Type 'help' for available commands.
+
+zenith> 
 ```
 
-The shell echoes keyboard input. Backspace deletes; Enter starts a new line
-with the `zenith> ` prompt.
+At the `zenith> ` prompt, type `help` for the command list. Other commands:
+`version`, `about`, `echo <text>`, `uptime`, `clear`, and `flip`. Backspace
+edits the line; Enter runs it. F12 also cycles the display orientation.
+
+Full boot diagnostics remain available on serial (`-serial stdio`).
 
 ## VM display orientation
 

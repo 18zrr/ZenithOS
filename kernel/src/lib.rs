@@ -94,6 +94,10 @@ pub extern "C" fn kernel_main() -> ! {
 
     diagnostics::println("Zenith OS: starting scheduler...");
 
+    // Full boot logs stay on COM1 serial; only now is the desktop painted and
+    // on-screen console output enabled.
+    framebuffer::boot_complete();
+
     task::init();
     task::start()
 }

@@ -8,9 +8,11 @@ restores callee-saved registers and the stack pointer.
 
 ## Tasks
 
-- **Shell task**: interactive echo over the PS/2 keyboard; Enter starts a new
-  prompt line, Backspace deletes, F12 cycles framebuffer orientation.
-- **Heartbeat task**: prints a tick marker roughly once per second.
+- **Shell task**: interactive line editor over the PS/2 keyboard with commands
+  `help`, `version`, `about`, `echo`, `uptime`, `clear`, and `flip`. Backspace
+  edits the line, Enter runs it, and F12 cycles framebuffer orientation.
+- **Heartbeat task**: polls the NIC and writes a tick marker roughly once per
+  second to COM1 serial only (not to the on-screen console).
 - **Idle task**: yields forever.
 
 ## Yielding

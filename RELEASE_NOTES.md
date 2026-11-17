@@ -14,7 +14,7 @@ Zenith OS is an independent operating system written in Rust (with assembly for 
 
 ## What works
 
-- **Kernel**: long-mode boot, 4-level paging, 4 KiB demand paging (verified recovery test), 48-entry IDT, PIC, 100 Hz PIT, all 32 exceptions named with register dumps, PS/2 keyboard, syscall MSR setup, per-task scheduler.
+- **Kernel**: long-mode boot, 4-level paging, 4 KiB demand paging (verified recovery test), 48-entry IDT, PIC, 100 Hz PIT, all 32 exceptions named with register dumps, PS/2 keyboard, syscall MSR setup, per-task scheduler, and an interactive command shell (`help`, `version`, `about`, `echo`, `uptime`, `clear`, `flip`) over a clean framebuffer desktop.
 - **Zenith FS v5**: format/mount/create/read/write/unlink, journal replay, extents, 200 GiB sparse file verified, `rwx` permissions with `chmod`/`chown`, nested directories, persistence across reboots.
 - **Other filesystems**: FAT32, NTFS, ext4 read-only readers (ext4 tested against a real `mkfs.ext4` image).
 - **Hardware**: PCI enumeration, ATA PIO read/write, ACPI RSDP, e1000 MAC/link/TX (ARP/ICMP/DHCP/UDP/TCP frame construction), UHCI controller + port detection, NVIDIA detection/probing.
