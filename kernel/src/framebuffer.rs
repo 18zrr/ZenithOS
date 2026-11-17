@@ -228,6 +228,15 @@ pub fn available() -> bool {
     FRAMEBUFFER.lock().is_some()
 }
 
+/// Return the framebuffer size in pixels, or `(0, 0)` when unavailable.
+pub fn dimensions() -> (usize, usize) {
+    FRAMEBUFFER
+        .lock()
+        .as_ref()
+        .map(|fb| (fb.width, fb.height))
+        .unwrap_or((0, 0))
+}
+
 struct TextCursor {
     column: usize,
     row: usize,
@@ -428,7 +437,13 @@ fn fill_rect_locked(fb: &Framebuffer, x: usize, y: usize, width: usize, height: 
     }
 }
 
-/// Draw a string at an arbitrary pixel position (used for static chrome).
+/// Draw a string at an arbitrary pixel position (used by desktop and installer).
+pub fn text(x: usize, y: usize, message: &str, color: u32) {
+    if let Some(fb) = FRAMEBUFFER.lock().as_ref() {
+        draw_text(fb, x, y, message, color);
+    }
+}
+
 fn draw_text(fb: &Framebuffer, x: usize, y: usize, text: &str, color: u32) {
     for (index, byte) in text.bytes().enumerate() {
         let glyph = &FONT[(byte as usize) & 0x7F];
@@ -483,4 +498,75 @@ fn draw_desktop() {
         fill_rect_locked(fb, dock_x + 8 + index * (dock_size + 4), dock_y + 10,
                          dock_size - 16, dock_size - 20, icon);
     }
+}
+
+// ---- Boot splash ---------------------------------------------------------
+
+const SPLASH_BG: u32 = 0x000B1220;
+const SPLASH_FG: u32 = 0x00F0F4F8;
+const SPLASH_MUTED: u32 = 0x006B7A8A;
+
+fn splash_bar(fb: &Framebuffer) -> (usize, usize, usize) {
+    let bar_w = 440usize.min(fb.width.saturating_sub(80));
+    let x = (fb.width.saturating_sub(bar_w)) / 2;
+    let y = fb.height.saturating_sub(150);
+    (x, y, bar_w)
+}
+
+fn centered_text(fb: &Framebuffer, y: usize, message: &str, color: u32) {
+    let x = fb.width.saturating_sub(message.len() * COL_PITCH) / 2;
+    draw_text(fb, x, y, message, color);
+}
+
+/// Paint the Deepin-style boot splash. Called during real initialisation, so
+/// the progress bar reflects work actually being done rather than a delay.
+pub fn splash_init() {
+    let framebuffer = FRAMEBUFFER.lock();
+    let Some(fb) = framebuffer.as_ref() else {
+        return;
+    };
+    let (width, height) = (fb.width, fb.height);
+    clear_locked(fb, SPLASH_BG);
+    fill_rect_locked(fb, 0, 0, width, 4, ACCENT);
+
+    let logo = 96usize.min(width / 6).min(height / 6);
+    let logo_x = (width - logo) / 2;
+    let logo_y = height / 2 - logo - 64;
+
+    // Framed logo with a stylised "Z".
+    fill_rect_locked(fb, logo_x, logo_y, logo, 4, ACCENT);
+    fill_rect_locked(fb, logo_x, logo_y + logo - 4, logo, 4, ACCENT);
+    fill_rect_locked(fb, logo_x, logo_y, 4, logo, ACCENT);
+    fill_rect_locked(fb, logo_x + logo - 4, logo_y, 4, logo, ACCENT);
+    let inner = logo / 5;
+    let left = logo_x + logo / 4;
+    let top = logo_y + logo / 4;
+    fill_rect_locked(fb, left, top, inner * 3, inner, SPLASH_FG);
+    fill_rect_locked(fb, left, top + inner * 2, inner * 3, inner, SPLASH_FG);
+    for step in 0..3 {
+        fill_rect_locked(fb, left + inner * (2 - step), top + inner * (step + 1),
+                         inner, inner, SPLASH_FG);
+    }
+
+    centered_text(fb, logo_y + logo + 24, "ZENITH OS", SPLASH_FG);
+    centered_text(fb, logo_y + logo + 52, "INDEPENDENT x86_64 OPERATING SYSTEM", SPLASH_MUTED);
+
+    let (bar_x, bar_y, bar_w) = splash_bar(fb);
+    fill_rect_locked(fb, bar_x, bar_y, bar_w, 6, 0x00212930);
+    centered_text(fb, bar_y - 32, "Starting Zenith OS...", SPLASH_MUTED);
+}
+
+/// Update the splash progress bar (0..=100) and status message.
+pub fn splash_step(status: &str, progress: usize) {
+    let framebuffer = FRAMEBUFFER.lock();
+    let Some(fb) = framebuffer.as_ref() else {
+        return;
+    };
+    let (bar_x, bar_y, bar_w) = splash_bar(fb);
+    fill_rect_locked(fb, 0, bar_y - 36, fb.width, 28, SPLASH_BG);
+    centered_text(fb, bar_y - 32, status, SPLASH_MUTED);
+    let percent = progress.min(100);
+    let filled = bar_w * percent / 100;
+    fill_rect_locked(fb, bar_x, bar_y, filled, 6, ACCENT);
+    fill_rect_locked(fb, bar_x + filled, bar_y, bar_w - filled, 6, 0x00212930);
 }

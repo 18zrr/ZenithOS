@@ -62,7 +62,16 @@ data from implemented subsystems:
 - `version`, `about`, `echo <text>`, `uptime`, `clear`, `flip`
 
 Backspace edits the line; Up/Down recall history; Enter runs the command.
-F12 also cycles the display orientation.
+F12 also cycles the display orientation. Type `install` for a five-step
+graphical installation wizard:
+
+```
+1 Welcome   2 Disk   3 Confirm   4 Install   5 Done
+```
+
+Use Up/Down to choose, Enter to continue, Backspace to go back, and Esc to quit.
+The wizard reads real ATA/Zenith FS state and reports failure honestly when no
+writable disk is present (for example on a CD-only boot).
 
 Full boot diagnostics remain available on serial (`-serial stdio`).
 

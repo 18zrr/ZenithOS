@@ -16,6 +16,7 @@ pub mod e1000;
 pub mod font;
 pub mod framebuffer;
 pub mod fs;
+pub mod installer;
 pub mod interrupt;
 pub mod io;
 pub mod keyboard;
@@ -70,11 +71,14 @@ pub extern "C" fn kernel_main() -> ! {
     page_table::init();
     page_table::init_demand_page();
     framebuffer::init();
+    framebuffer::splash_init();
+    framebuffer::splash_step("Preparing memory...", 12);
     limine::report_memory_map();
     memory::init_memory_management();
     paging::init_paging();
     process::init_process_manager();
 
+    framebuffer::splash_step("Setting up interrupts...", 32);
     interrupt::init();
     timer::init();
     // Driver delays rely on the PIT tick counter.
@@ -82,16 +86,24 @@ pub extern "C" fn kernel_main() -> ! {
 
     test_demand_page();
 
+    framebuffer::splash_step("Detecting hardware...", 58);
     pci::scan();
     e1000::init();
     net::init(e1000::mac());
     usb::detect();
     nvidia::detect();
+    framebuffer::splash_step("Mounting filesystems...", 84);
     fs::init();
     acpi::init();
     ata::probe();
     syscalls::init();
 
+    framebuffer::splash_step("Starting desktop...", 100);
+    // Hold the finished splash briefly so the boot screen is actually seen.
+    let splash_end = timer::ticks() + 80;
+    while timer::ticks() < splash_end {
+        core::hint::spin_loop();
+    }
     diagnostics::println("Zenith OS: starting scheduler...");
 
     // Full boot logs stay on COM1 serial; only now is the desktop painted and

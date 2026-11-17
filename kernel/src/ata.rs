@@ -1,7 +1,17 @@
 //! ATA PIO driver for the primary IDE bus (I/O ports 0x1F0-0x1F7).
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::diagnostics;
 use crate::io::{inb, outb};
+
+/// True when the primary master responded to a sector read during probe.
+static PRESENT: AtomicBool = AtomicBool::new(false);
+
+/// Whether a readable ATA disk was detected at boot.
+pub fn present() -> bool {
+    PRESENT.load(Ordering::Relaxed)
+}
 
 const DATA: u16 = 0x1F0;
 const SECTOR_COUNT: u16 = 0x1F2;
@@ -137,6 +147,7 @@ pub fn probe() {
         let mut buffer = [0u8; 512];
         match read_sector(0, &mut buffer) {
             Ok(()) => {
+                PRESENT.store(true, Ordering::Relaxed);
                 diagnostics::puts("[ata] primary master LBA0: ");
                 for &byte in &buffer[..8] {
                     diagnostics::put_hex(byte as u64);

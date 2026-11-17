@@ -166,6 +166,31 @@ pub fn init() {
     init_ext4();
 }
 
+/// Write installer manifest files onto the mounted Zenith FS partition.
+/// Returns a short human-readable error description on failure.
+pub fn installer_write() -> Result<(), &'static str> {
+    let map_error = |error: FsError| -> &'static str {
+        match error {
+            FsError::IoError => "disk I/O error",
+            FsError::DiskFull => "disk full",
+            FsError::PermissionDenied => "permission denied",
+            FsError::InvalidPath => "invalid path",
+            FsError::InvalidMagicNumber => "filesystem not present",
+            _ => "filesystem error",
+        }
+    };
+
+    let mut fs = ZenithFs::mount(AtaBlockDevice).map_err(map_error)?;
+    fs.create_path("/boot", true).map_err(map_error)?;
+    let inode = fs
+        .create_path("/boot/ZENITH.CONF", false)
+        .map_err(map_error)?;
+    let manifest = b"Zenith OS v0.1.0\ninstalled-by=setup\nroot=zenith-fs\n";
+    fs.write(inode, manifest).map_err(map_error)?;
+    fs.flush().map_err(map_error)?;
+    Ok(())
+}
+
 /// Mount the ext4 test partition and read a known file.
 fn init_ext4() {
     let mut fs = match Ext4::mount(Ext4AtaBlockDevice) {

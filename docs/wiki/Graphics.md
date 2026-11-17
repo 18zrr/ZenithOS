@@ -29,9 +29,12 @@ chrome and enables console output only after all subsystems are ready, so the
 screen opens on a clean shell instead of debug spam. Full logs still go to COM1
 serial.
 
-This is static drawing, not a window manager. Zenith UI is currently a data
-model only (see [Userland](Userland.md)), so no UI elements are wired to the
-framebuffer beyond this desktop and text console.
+Two full-screen graphical surfaces are also drawn: the boot splash during
+initialisation (see [Boot Process](Boot-Process.md)) and the five-step
+installation wizard launched with the `install` shell command. The wizard uses
+the same drawing primitives and raw keyboard scancodes; it is a modal overlay,
+not a window-manager application. Zenith UI remains a data model only (see
+[Userland](Userland.md)).
 
 ## Text console
 

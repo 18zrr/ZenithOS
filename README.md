@@ -20,6 +20,16 @@ docs/           Documentation
 
 All crates are members of one Cargo workspace rooted at `Cargo.toml`.
 
+## Graphical boot and installer
+
+Zenith OS shows a Deepin-inspired graphical boot splash during real hardware
+initialisation: a logo, status messages and a progress bar. After the desktop
+appears, type `install` at the shell to open a five-step graphical installation
+wizard (Welcome, Disk, Confirm, Install, Done) with a step sidebar, keyboard
+navigation (Up/Down, Enter, Backspace, Esc) and a real Zenith FS write. When no
+writable disk is available — for example when booting the CD image — the wizard
+reports the failure honestly rather than faking success.
+
 ## Interactive shell
 
 The boot log goes to COM1 serial only; the screen shows a clean desktop with a

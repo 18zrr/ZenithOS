@@ -39,6 +39,9 @@ of truth for release wording.
 - **Hardware**: PCI enumeration, ATA PIO read/write, ACPI RSDP, e1000
   MAC/link/TX (ARP/ICMP/DHCP/UDP/TCP frame construction), UHCI controller + port
   detection, NVIDIA detection/probing.
+- **UX**: Deepin-inspired graphical boot splash and a five-step graphical
+  installer (`install` command) with real ATA/Zenith FS data and honest
+  failure reporting.
 - **Apps**: seven `no_std` application libraries with host demo binaries;
   terminal has real command parsing.
 - **Tooling**: scripts for BIOS/UEFI disk images, bootable ISO, and

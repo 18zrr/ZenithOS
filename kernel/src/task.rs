@@ -197,6 +197,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
             diagnostics::println("  uptime    seconds since boot");
             diagnostics::println("  clear     clear the screen");
             diagnostics::println("  flip      change display orientation");
+            diagnostics::println("  install   graphical installation wizard");
         }
         "sysinfo" => {
             diagnostics::println("Zenith OS v0.1.0 - system overview");
@@ -332,6 +333,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
         }
         "clear" => diagnostics::clear_screen(),
         "flip" => crate::framebuffer::cycle_orientation(),
+        "install" => crate::installer::run(),
         other => {
             diagnostics::puts("unknown command: ");
             diagnostics::println(other);
