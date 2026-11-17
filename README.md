@@ -28,6 +28,13 @@ see the available commands:
 
 ```
 help      show this list
+sysinfo   system overview (boot mode, display, memory, MAC/link)
+pci       list PCI devices
+mem       memory summary
+net       network status (MAC, link, IP, gateway)
+gpu       detected GPU info
+acpi      ACPI RSDP pointer
+history   recent commands
 version   show OS version
 about     about Zenith OS
 echo      print text
@@ -36,8 +43,9 @@ clear     clear the screen
 flip      change display orientation
 ```
 
-The shell supports line editing (Backspace). F12 also cycles display
-orientation.
+The shell supports line editing (Backspace), command history (Up/Down arrows),
+and F12 to cycle display orientation. All commands read real data from the
+implemented subsystems — nothing is simulated.
 
 ## Current status (verified)
 

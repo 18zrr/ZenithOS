@@ -96,6 +96,25 @@ pub fn rsdp_address() -> u64 {
         .unwrap_or(0)
 }
 
+/// Return `(entry_count, usable_bytes)` from the Limine memory map.
+/// Limine type 0 is conventional usable RAM.
+pub fn memory_summary() -> (u64, u64) {
+    let response: &LimineMemmapResponse = match unsafe { response(&limine_memmap_request) } {
+        Some(response) => response,
+        None => return (0, 0),
+    };
+    let table = response.entries as *const u64;
+    let mut usable = 0u64;
+    for index in 0..response.entry_count {
+        let pointer = unsafe { read_unaligned(table.add(index as usize)) };
+        let entry = unsafe { &*(pointer as *const LimineMemmapEntry) };
+        if entry.entry_type == 0 {
+            usable = usable.saturating_add(entry.length);
+        }
+    }
+    (response.entry_count, usable)
+}
+
 /// Report the memory map over the serial console.
 pub fn report_memory_map() {
     let response: &LimineMemmapResponse = match unsafe { response(&limine_memmap_request) } {

@@ -259,6 +259,12 @@ pub fn mac() -> [u8; 6] {
     unsafe { CONTROLLER.as_ref().map(|controller| controller.mac).unwrap_or([0; 6]) }
 }
 
+/// Return the current link status (STATUS.LU, bit 1).
+#[allow(static_mut_refs)]
+pub fn link_up() -> bool {
+    unsafe { CONTROLLER.as_ref().map(|controller| controller.read(STATUS) & 0x2 != 0).unwrap_or(false) }
+}
+
 /// Send a raw Ethernet frame.
 #[allow(static_mut_refs)]
 pub fn send_frame(frame: &[u8]) -> Result<usize, &'static str> {

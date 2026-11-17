@@ -135,8 +135,42 @@ extern "C" fn task_trampoline() {
     }
 }
 
+fn put_hex_byte(byte: u8) {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    diagnostics::putc(DIGITS[(byte >> 4) as usize]);
+    diagnostics::putc(DIGITS[(byte & 0x0F) as usize]);
+}
+
+fn print_mac(mac: [u8; 6]) {
+    for index in 0..6 {
+        if index > 0 {
+            diagnostics::puts(":");
+        }
+        put_hex_byte(mac[index]);
+    }
+}
+
+fn print_ip(ip: [u8; 4]) {
+    for index in 0..4 {
+        if index > 0 {
+            diagnostics::puts(".");
+        }
+        diagnostics::put_dec(ip[index] as u64);
+    }
+}
+
+fn redraw_line(prompt: &str, text: &str) {
+    diagnostics::puts("\r");
+    for _ in 0..(prompt.len() + text.len() + 2) {
+        diagnostics::puts(" ");
+    }
+    diagnostics::puts("\r");
+    diagnostics::puts(prompt);
+    diagnostics::puts(text);
+}
+
 /// Run a command entered at the shell prompt.
-fn execute_command(line: &str) {
+fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
     let line = line.trim();
     if line.is_empty() {
         return;
@@ -150,12 +184,136 @@ fn execute_command(line: &str) {
         "help" => {
             diagnostics::println("Available commands:");
             diagnostics::println("  help      show this list");
+            diagnostics::println("  sysinfo   system overview");
+            diagnostics::println("  pci       list PCI devices");
+            diagnostics::println("  mem       memory summary");
+            diagnostics::println("  net       network status");
+            diagnostics::println("  gpu       detected GPU");
+            diagnostics::println("  acpi      ACPI table pointer");
+            diagnostics::println("  history   recent commands");
             diagnostics::println("  version   show OS version");
             diagnostics::println("  about     about Zenith OS");
             diagnostics::println("  echo      print text");
             diagnostics::println("  uptime    seconds since boot");
             diagnostics::println("  clear     clear the screen");
             diagnostics::println("  flip      change display orientation");
+        }
+        "sysinfo" => {
+            diagnostics::println("Zenith OS v0.1.0 - system overview");
+            diagnostics::puts("boot: ");
+            diagnostics::println(if crate::limine::is_active() { "Limine native" } else { "PVH direct" });
+            if let Some(fb) = crate::limine::framebuffer() {
+                diagnostics::puts("display: ");
+                diagnostics::put_dec(fb.width);
+                diagnostics::puts("x");
+                diagnostics::put_dec(fb.height);
+                diagnostics::puts("x");
+                diagnostics::put_dec(fb.bpp as u64);
+                diagnostics::puts("\n");
+            }
+            let (regions, usable) = crate::limine::memory_summary();
+            diagnostics::puts("memory: ");
+            diagnostics::put_dec(usable / (1024 * 1024));
+            diagnostics::puts(" MiB usable in ");
+            diagnostics::put_dec(regions);
+            diagnostics::println(" regions");
+            diagnostics::puts("hddm: ");
+            diagnostics::put_hex(crate::limine::hhdm_offset());
+            diagnostics::puts("\n");
+            diagnostics::puts("mac: ");
+            print_mac(crate::e1000::mac());
+            diagnostics::puts("  link: ");
+            diagnostics::println(if crate::e1000::link_up() { "up" } else { "down" });
+        }
+        "pci" => {
+            let mut count = 0u64;
+            for bus in 0..8u8 {
+                for slot in 0..32u8 {
+                    let ids = crate::pci::read(bus, slot, 0, 0);
+                    let vendor = ids & 0xFFFF;
+                    if vendor == 0xFFFF {
+                        continue;
+                    }
+                    let class = crate::pci::read(bus, slot, 0, 8) >> 24;
+                    diagnostics::puts("  ");
+                    diagnostics::put_hex(bus as u64);
+                    diagnostics::puts(":");
+                    diagnostics::put_hex(slot as u64);
+                    diagnostics::puts(" vendor=");
+                    diagnostics::put_hex(vendor as u64);
+                    diagnostics::puts(" device=");
+                    diagnostics::put_hex((ids >> 16) as u64);
+                    diagnostics::puts(" class=");
+                    diagnostics::put_hex(class as u64);
+                    diagnostics::puts("\n");
+                    count += 1;
+                }
+            }
+            diagnostics::puts("pci devices: ");
+            diagnostics::put_dec(count);
+            diagnostics::puts("\n");
+        }
+        "mem" => {
+            let (regions, usable) = crate::limine::memory_summary();
+            diagnostics::puts("usable memory: ");
+            diagnostics::put_dec(usable / (1024 * 1024));
+            diagnostics::puts(" MiB (");
+            diagnostics::put_dec(usable);
+            diagnostics::puts(" bytes) in ");
+            diagnostics::put_dec(regions);
+            diagnostics::println(" regions");
+        }
+        "net" => {
+            diagnostics::puts("mac: ");
+            print_mac(crate::e1000::mac());
+            diagnostics::puts("\nlink: ");
+            diagnostics::println(if crate::e1000::link_up() { "up" } else { "down" });
+            diagnostics::puts("ip: ");
+            print_ip(crate::net::our_ip());
+            diagnostics::puts("\ngateway: ");
+            print_ip(crate::net::gateway());
+            diagnostics::puts("\n");
+            diagnostics::println("note: transmit works; RX is not validated");
+        }
+        "gpu" => match crate::nvidia::detected() {
+            Some(info) => {
+                diagnostics::puts("gpu: ");
+                diagnostics::println(crate::nvidia::region_name(info.device));
+                diagnostics::puts("  device=");
+                diagnostics::put_hex(info.device as u64);
+                diagnostics::puts(" boot0=");
+                diagnostics::put_hex(info.boot0 as u64);
+                diagnostics::puts("\n  bar0=");
+                diagnostics::put_hex(info.bar0);
+                diagnostics::puts("\n");
+                diagnostics::println("  detection/probing only - no driver");
+            }
+            None => diagnostics::println("gpu: no NVIDIA display controller detected"),
+        },
+        "acpi" => {
+            let rsdp = {
+                let limine = crate::limine::rsdp_address();
+                if limine != 0 { limine } else { crate::framebuffer::mb2_rsdp() }
+            };
+            if rsdp != 0 {
+                diagnostics::puts("acpi rsdp=");
+                diagnostics::put_hex(rsdp);
+                diagnostics::puts("\n");
+            } else {
+                diagnostics::println("acpi: no RSDP reported");
+            }
+        }
+        "history" => {
+            if history_len == 0 {
+                diagnostics::println("history: empty");
+            } else {
+                for (index, entry) in history.iter().take(history_len).enumerate() {
+                    let length = entry.iter().position(|&byte| byte == 0).unwrap_or(entry.len());
+                    diagnostics::put_dec(index as u64 + 1);
+                    diagnostics::puts("  ");
+                    diagnostics::println(core::str::from_utf8(&entry[..length]).unwrap_or(""));
+                }
+            }
         }
         "version" => diagnostics::println("Zenith OS v0.1.0 (x86_64, Limine)"),
         "about" => {
@@ -184,18 +342,51 @@ fn execute_command(line: &str) {
 
 /// Interactive line-editing shell over the PS/2 keyboard.
 fn shell_task() {
+    const CAPACITY: usize = 16;
+
     diagnostics::println("Zenith OS v0.1.0 - interactive shell");
     diagnostics::println("Type 'help' for available commands.");
     diagnostics::puts("zenith> ");
 
     let mut line = [0u8; 128];
     let mut length = 0usize;
+    let mut history = [[0u8; 128]; CAPACITY];
+    let mut history_len = 0usize;
+    let mut history_index = 0usize;
+    let mut extended = false;
 
     loop {
-        // F12 cycles the framebuffer orientation for VMs with rotated displays.
         if let Some(scancode) = keyboard::take_raw() {
-            if scancode == 0x58 {
-                crate::framebuffer::cycle_orientation();
+            if scancode == 0xE0 {
+                extended = true;
+            } else if scancode == 0x58 && !extended {
+                crate::framebuffer::cycle_orientation(); // F12
+            } else {
+                // Arrow keys may arrive with or without the E0 prefix.
+                let key = scancode;
+                extended = false;
+                if key == 0x48 || key == 0x50 {
+                    let load = match key {
+                        0x48 if history_index > 0 => Some(history_index - 1), // Up
+                        0x50 if history_index + 1 < history_len => Some(history_index + 1), // Down
+                        0x50 if history_index < history_len => {
+                            history_index = history_len;
+                            length = 0;
+                            redraw_line("zenith> ", "");
+                            None
+                        }
+                        _ => None,
+                    };
+                    if let Some(index) = load {
+                        history_index = index;
+                        length = 0;
+                        while length < line.len() && history[index][length] != 0 {
+                            length += 1;
+                        }
+                        line[..length].copy_from_slice(&history[index][..length]);
+                        redraw_line("zenith> ", core::str::from_utf8(&line[..length]).unwrap_or(""));
+                    }
+                }
             }
         }
 
@@ -205,7 +396,21 @@ fn shell_task() {
                     diagnostics::putc(b'\n');
                     if length > 0 {
                         let command = core::str::from_utf8(&line[..length]).unwrap_or("");
-                        execute_command(command);
+                        let slot = if history_len < CAPACITY {
+                            let slot = history_len;
+                            history_len += 1;
+                            slot
+                        } else {
+                            for index in 0..CAPACITY - 1 {
+                                history[index] = history[index + 1];
+                            }
+                            CAPACITY - 1
+                        };
+                        history[slot] = [0u8; 128];
+                        history[slot][..length].copy_from_slice(&line[..length]);
+                        history_index = history_len;
+
+                        execute_command(command, &history, history_len);
                         length = 0;
                     }
                     diagnostics::puts("zenith> ");

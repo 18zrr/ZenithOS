@@ -9,8 +9,10 @@ restores callee-saved registers and the stack pointer.
 ## Tasks
 
 - **Shell task**: interactive line editor over the PS/2 keyboard with commands
-  `help`, `version`, `about`, `echo`, `uptime`, `clear`, and `flip`. Backspace
-  edits the line, Enter runs it, and F12 cycles framebuffer orientation.
+  `help`, `sysinfo`, `pci`, `mem`, `net`, `gpu`, `acpi`, `history`, `version`,
+  `about`, `echo`, `uptime`, `clear`, and `flip`, all backed by real subsystem
+  data. Backspace edits the line, Up/Down recall history, Enter runs it, and
+  F12 cycles framebuffer orientation.
 - **Heartbeat task**: polls the NIC and writes a tick marker roughly once per
   second to COM1 serial only (not to the on-screen console).
 - **Idle task**: yields forever.

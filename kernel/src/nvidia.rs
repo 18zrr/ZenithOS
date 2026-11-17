@@ -9,6 +9,7 @@
 use crate::diagnostics;
 use crate::limine;
 use crate::pci;
+use crate::sync::SpinLock;
 
 const NVIDIA_VENDOR: u32 = 0x10DE;
 const CLASS_DISPLAY: u8 = 0x03;
@@ -22,6 +23,15 @@ fn mmio_address(physical: u64) -> usize {
     }
 }
 
+/// Details of the first NVIDIA display controller found at boot.
+static DETECTED: SpinLock<Option<GpuInfo>> = SpinLock::new(None);
+
+/// Return the detected NVIDIA GPU, if any.
+pub fn detected() -> Option<GpuInfo> {
+    *DETECTED.lock()
+}
+
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct GpuInfo {
     pub vendor: u16,
@@ -33,7 +43,8 @@ pub struct GpuInfo {
     pub boot0: u32,
 }
 
-fn region_name(device: u16) -> &'static str {
+/// Human-readable name for a known NVIDIA device id.
+pub fn region_name(device: u16) -> &'static str {
     match device {
         0x2482 => "AD104 / GeForce RTX 4070 SUPER (Ada Lovelace)",
         0x248A => "AD104 / GeForce RTX 4070 Ti (Ada Lovelace)",
@@ -96,13 +107,24 @@ pub fn detect() {
                 // NV_PMC_BOOT_0 at BAR0 + 0x0000 identifies the chipset. Only
                 // probe mapped, non-zero 32-bit BARs; some are 64-bit or
                 // unimplemented and must be skipped.
+                let mut boot0 = 0u32;
                 if bar0 != 0 && bar0 < 0xFFFF_FFFF_0000_0000 {
                     let address = mmio_address(bar0);
-                    let boot0 = unsafe { core::ptr::read_volatile(address as *const u32) };
+                    boot0 = unsafe { core::ptr::read_volatile(address as *const u32) };
                     diagnostics::puts("[nvidia] NV_PMC_BOOT_0=");
                     diagnostics::put_hex(boot0 as u64);
                     diagnostics::puts("\n");
                 }
+
+                *DETECTED.lock() = Some(GpuInfo {
+                    vendor: NVIDIA_VENDOR as u16,
+                    device,
+                    subsystem_vendor: (subsystem & 0xFFFF) as u16,
+                    subsystem_device: (subsystem >> 16) as u16,
+                    bar0,
+                    bar1,
+                    boot0,
+                });
 
                 diagnostics::debug(
                     "[nvidia] GSP firmware upload, engine init, and mode setting: NOT IMPLEMENTED",

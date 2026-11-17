@@ -49,9 +49,20 @@ Type 'help' for available commands.
 zenith> 
 ```
 
-At the `zenith> ` prompt, type `help` for the command list. Other commands:
-`version`, `about`, `echo <text>`, `uptime`, `clear`, and `flip`. Backspace
-edits the line; Enter runs it. F12 also cycles the display orientation.
+At the `zenith> ` prompt, type `help` for the command list. Commands read real
+data from implemented subsystems:
+
+- `sysinfo` — boot mode, display resolution, memory, MAC and link status
+- `pci` — PCI devices found by configuration-space enumeration
+- `mem` — usable memory and region count from the Limine memory map
+- `net` — MAC, link status, IP and gateway (RX is not validated)
+- `gpu` — detected NVIDIA GPU (detection/probing only, no driver)
+- `acpi` — ACPI RSDP pointer
+- `history` — recently entered commands
+- `version`, `about`, `echo <text>`, `uptime`, `clear`, `flip`
+
+Backspace edits the line; Up/Down recall history; Enter runs the command.
+F12 also cycles the display orientation.
 
 Full boot diagnostics remain available on serial (`-serial stdio`).
 
