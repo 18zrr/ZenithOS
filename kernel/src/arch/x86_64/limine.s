@@ -48,6 +48,13 @@ limine_kernel_address_request:
 .quad 0
 .quad 0
 
+.global limine_executable_cmdline_request
+limine_executable_cmdline_request:
+.quad 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b
+.quad 0x4b161536e598651e, 0xb390ad4a2f1f303a
+.quad 0
+.quad 0
+
 .section .limine_requests_end,"a",@progbits
 .balign 8
 .quad 0xadc0e0531bb10d03, 0x9572709f31764c62

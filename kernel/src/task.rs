@@ -363,19 +363,7 @@ fn shell_task() {
     let mut history_index = 0usize;
 
     loop {
-        let raw = keyboard::take_raw();
-        let byte = keyboard::read_char();
-
-        // Global shortcuts are available regardless of which window is active.
-        if let Some(sc) = raw {
-            match sc {
-                0x3B => crate::wm::toggle_menu(), // F1
-                0x58 => crate::framebuffer::cycle_orientation(), // F12
-                _ => {}
-            }
-        }
-
-        // USB HID reports are polled from the same task as PS/2 input.
+        keyboard::poll();
         crate::usb::poll();
 
         // Mouse events drive the window manager.
@@ -384,81 +372,107 @@ fn shell_task() {
             continue;
         }
 
-        // While the Start menu is open it owns all keyboard input.
-        if crate::start_menu::is_open() {
-            if crate::wm::menu_key(raw, byte) == crate::wm::Action::Installer {
-                run_installer();
+        while let Some(event) = keyboard::take_event() {
+            if !event.pressed {
+                continue;
             }
-            crate::wm::tick();
-            yield_now();
-            continue;
-        }
+            match event.key {
+                keyboard::Key::F(1) => {
+                    crate::wm::toggle_menu();
+                    continue;
+                }
+                keyboard::Key::F(12) => {
+                    crate::framebuffer::cycle_orientation();
+                    continue;
+                }
+                _ => {}
+            }
 
-        // Typing belongs to the terminal only while it has focus.
-        if crate::wm::terminal_focused() {
-            if let Some(key) = raw {
-                if key == 0x48 || key == 0x50 {
-                    let load = match key {
-                        0x48 if history_index > 0 => Some(history_index - 1), // Up
-                        0x50 if history_index + 1 < history_len => Some(history_index + 1), // Down
-                        0x50 if history_index < history_len => {
-                            history_index = history_len;
-                            length = 0;
-                            redraw_line("zenith> ", "");
-                            None
-                        }
-                        _ => None,
-                    };
-                    if let Some(index) = load {
-                        history_index = index;
+            // While the Start menu is open it owns all keyboard input.
+            if crate::start_menu::is_open() {
+                if crate::wm::menu_key(event) == crate::wm::Action::Installer {
+                    run_installer();
+                }
+                continue;
+            }
+
+            // Typing belongs to the terminal only while it has focus.
+            if !crate::wm::terminal_focused() {
+                continue;
+            }
+
+            match event.key {
+                keyboard::Key::Up => {
+                    if history_index > 0 {
+                        history_index -= 1;
                         length = 0;
-                        while length < line.len() && history[index][length] != 0 {
+                        while length < line.len() && history[history_index][length] != 0 {
                             length += 1;
                         }
-                        line[..length].copy_from_slice(&history[index][..length]);
+                        line[..length].copy_from_slice(&history[history_index][..length]);
                         redraw_line("zenith> ", core::str::from_utf8(&line[..length]).unwrap_or(""));
                     }
                 }
-            }
-
-            if let Some(byte) = byte {
-                match byte {
-                    b'\r' | b'\n' => {
-                        diagnostics::putc(b'\n');
-                        if length > 0 {
-                            let command = core::str::from_utf8(&line[..length]).unwrap_or("");
-                            let slot = if history_len < CAPACITY {
-                                let slot = history_len;
-                                history_len += 1;
-                                slot
-                            } else {
-                                for index in 0..CAPACITY - 1 {
-                                    history[index] = history[index + 1];
-                                }
-                                CAPACITY - 1
-                            };
-                            history[slot] = [0u8; 128];
-                            history[slot][..length].copy_from_slice(&line[..length]);
-                            history_index = history_len;
-
-                            execute_command(command, &history, history_len);
-                            length = 0;
+                keyboard::Key::Down => {
+                    if history_index + 1 < history_len {
+                        history_index += 1;
+                        length = 0;
+                        while length < line.len() && history[history_index][length] != 0 {
+                            length += 1;
                         }
-                        diagnostics::puts("zenith> ");
+                        line[..length].copy_from_slice(&history[history_index][..length]);
+                        redraw_line("zenith> ", core::str::from_utf8(&line[..length]).unwrap_or(""));
+                    } else if history_index < history_len {
+                        history_index = history_len;
+                        length = 0;
+                        redraw_line("zenith> ", "");
                     }
-                    0x08 => {
-                        if length > 0 {
-                            length -= 1;
-                            diagnostics::puts("\x08 \x08");
-                        }
+                }
+                keyboard::Key::PageUp => crate::framebuffer::scroll_lines(10),
+                keyboard::Key::PageDown => crate::framebuffer::scroll_lines(-10),
+                keyboard::Key::Enter => {
+                    diagnostics::putc(b'\n');
+                    if length > 0 {
+                        let command = core::str::from_utf8(&line[..length]).unwrap_or("");
+                        let slot = if history_len < CAPACITY {
+                            let slot = history_len;
+                            history_len += 1;
+                            slot
+                        } else {
+                            for index in 0..CAPACITY - 1 {
+                                history[index] = history[index + 1];
+                            }
+                            CAPACITY - 1
+                        };
+                        history[slot] = [0u8; 128];
+                        history[slot][..length].copy_from_slice(&line[..length]);
+                        history_index = history_len;
+
+                        execute_command(command, &history, history_len);
+                        length = 0;
                     }
-                    other if length + 1 < line.len() => {
+                    diagnostics::puts("zenith> ");
+                }
+                keyboard::Key::Backspace => {
+                    if length > 0 {
+                        length -= 1;
+                        diagnostics::puts("\x08 \x08");
+                    }
+                }
+                keyboard::Key::Char(b'l') if event.ctrl => crate::framebuffer::clear_screen(),
+                keyboard::Key::Char(b'c') if event.ctrl => {
+                    length = 0;
+                    diagnostics::println("^C");
+                    diagnostics::puts("zenith> ");
+                }
+                keyboard::Key::Char(other) if (0x20..=0x7E).contains(&other) => {
+                    if length + 1 < line.len() {
                         line[length] = other;
                         length += 1;
                         diagnostics::putc(other);
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 

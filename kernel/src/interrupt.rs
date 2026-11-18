@@ -280,19 +280,21 @@ fn page_fault(frame: &InterruptFrame) {
         return;
     }
     let code = frame.error_code;
-    diagnostics::puts("[page fault] address=");
-    diagnostics::put_hex(cr2 as u64);
-    diagnostics::puts(" error=");
-    diagnostics::put_hex(code);
-    diagnostics::puts(" ");
-    diagnostics::puts(if code & 1 != 0 { "P=1 " } else { "P=0 " });
-    diagnostics::puts(if code & 2 != 0 { "W " } else { "R " });
-    diagnostics::puts(if code & 4 != 0 { "U " } else { "S " });
-    diagnostics::puts(if code & 8 != 0 { "RSVD " } else { "" });
-    diagnostics::puts(if code & 16 != 0 { "I/D " } else { "" });
-    diagnostics::puts(" rip=");
-    diagnostics::put_hex(frame.rip);
-    diagnostics::puts("\n");
+    // Crash reporting must never take console locks: the fault may have
+    // happened while the recovery console held them.
+    diagnostics::serial_puts("[page fault] address=");
+    diagnostics::serial_put_hex(cr2 as u64);
+    diagnostics::serial_puts(" error=");
+    diagnostics::serial_put_hex(code);
+    diagnostics::serial_puts(" ");
+    diagnostics::serial_puts(if code & 1 != 0 { "P=1 " } else { "P=0 " });
+    diagnostics::serial_puts(if code & 2 != 0 { "W " } else { "R " });
+    diagnostics::serial_puts(if code & 4 != 0 { "U " } else { "S " });
+    diagnostics::serial_puts(if code & 8 != 0 { "RSVD " } else { "" });
+    diagnostics::serial_puts(if code & 16 != 0 { "I/D " } else { "" });
+    diagnostics::serial_puts(" rip=");
+    diagnostics::serial_put_hex(frame.rip);
+    diagnostics::serial_puts("\n");
     halt();
 }
 

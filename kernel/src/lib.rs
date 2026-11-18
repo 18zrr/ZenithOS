@@ -21,6 +21,7 @@ pub mod interrupt;
 pub mod io;
 pub mod keyboard;
 pub mod limine;
+pub mod logo;
 pub mod memory;
 pub mod net;
 pub mod nvidia;
@@ -66,8 +67,13 @@ pub extern "C" fn kernel_main() -> ! {
     diagnostics::init();
     diagnostics::println("Zenith OS kernel initialized successfully!");
 
+    let mode = limine::boot_mode();
     diagnostics::puts("[boot] limine active=");
     diagnostics::put_hex(limine::is_active() as u64);
+    diagnostics::puts(" mode=");
+    diagnostics::println(limine::mode_name(mode));
+    diagnostics::puts("[boot] cmdline: ");
+    diagnostics::println(limine::cmdline());
     diagnostics::puts(" hhdm=");
     diagnostics::put_hex(limine::hhdm_offset());
     diagnostics::puts("\n");
@@ -75,14 +81,24 @@ pub extern "C" fn kernel_main() -> ! {
     page_table::init();
     page_table::init_demand_page();
     framebuffer::init();
-    framebuffer::splash_init();
-    framebuffer::splash_step("Preparing memory...", 12);
+
+    if mode == limine::BootMode::Recovery {
+        framebuffer::recovery_start();
+        diagnostics::println("Zenith OS recovery console");
+        diagnostics::println("Graphical desktop disabled by the boot entry.");
+    } else {
+        framebuffer::splash_init();
+        framebuffer::splash_step("Preparing memory...", 12);
+    }
+
     limine::report_memory_map();
     memory::init_memory_management();
     paging::init_paging();
     process::init_process_manager();
 
-    framebuffer::splash_step("Setting up interrupts...", 32);
+    if mode != limine::BootMode::Recovery {
+        framebuffer::splash_step("Setting up interrupts...", 32);
+    }
     interrupt::init();
     // The mouse is programmed with interrupts still masked, then IRQ12 is
     // unmasked along with the timer and keyboard.
@@ -93,18 +109,34 @@ pub extern "C" fn kernel_main() -> ! {
 
     test_demand_page();
 
-    framebuffer::splash_step("Detecting hardware...", 58);
+    if mode != limine::BootMode::Recovery {
+        framebuffer::splash_step("Detecting hardware...", 58);
+    }
     pci::scan();
     e1000::init();
     net::init(e1000::mac());
     usb::detect();
     nvidia::detect();
-    framebuffer::splash_step("Mounting filesystems...", 84);
+    if mode != limine::BootMode::Recovery {
+        framebuffer::splash_step("Mounting filesystems...", 84);
+    }
     fs::init();
     acpi::init();
     ata::probe();
     syscalls::init();
 
+    if mode == limine::BootMode::Recovery {
+        // Keep COM1 as the complete boot log; the on-screen recovery console
+        // starts clean so the prompt is not buried under driver messages.
+        framebuffer::recovery_clear();
+        diagnostics::println("");
+        diagnostics::println("Recovery console ready. Type 'help' for commands.");
+        diagnostics::puts("recovery> ");
+        task::init();
+        task::start()
+    }
+
+    wm::set_safe_mode(mode == limine::BootMode::Safe);
     wm::init();
     framebuffer::splash_step("Starting desktop...", 100);
     // Hold the finished splash briefly so the boot screen is actually seen.

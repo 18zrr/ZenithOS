@@ -191,30 +191,25 @@ fn run_inner() {
     render(step, selection, progress, result);
 
     loop {
-        if let Some(key) = keyboard::take_raw() {
-            if key == 0x01 {
-                return; // Escape
+        while let Some(event) = keyboard::take_event() {
+            if !event.pressed {
+                continue;
             }
-            if key == 0x48 || key == 0x50 {
-                // Up / Down - choose on the confirm step only.
-                let previous = selection;
-                let max = if step == 2 { 1 } else { 0 };
-                if max > 0 {
-                    if key == 0x48 {
-                        selection = selection.saturating_sub(1);
-                    } else {
-                        selection = (selection + 1).min(max);
-                    }
-                    if selection != previous {
+            match event.key {
+                keyboard::Key::Escape => return,
+                keyboard::Key::Up => {
+                    if step == 2 && selection > 0 {
+                        selection -= 1;
                         render(step, selection, progress, result);
                     }
                 }
-            }
-        }
-
-        if let Some(byte) = keyboard::read_char() {
-            match byte {
-                b'\r' | b'\n' => match step {
+                keyboard::Key::Down => {
+                    if step == 2 && selection < 1 {
+                        selection += 1;
+                        render(step, selection, progress, result);
+                    }
+                }
+                keyboard::Key::Enter => match step {
                     0 | 1 => {
                         step += 1;
                         selection = 0;
@@ -236,14 +231,14 @@ fn run_inner() {
                     3 => {}
                     _ => return,
                 },
-                0x08 => {
+                keyboard::Key::Backspace => {
                     if step > 0 && step < 4 {
                         step -= 1;
                         selection = 0;
                         render(step, selection, progress, result);
                     }
                 }
-                0x1B | b'q' | b'Q' => return,
+                keyboard::Key::Char(b'q') | keyboard::Key::Char(b'Q') => return,
                 _ => {}
             }
         }

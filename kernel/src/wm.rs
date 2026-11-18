@@ -16,38 +16,48 @@ use alloc::vec::Vec;
 
 use crate::font::{blend, COL_PITCH, FONT, GLYPH_HEIGHT, GLYPH_WIDTH, ROW_PITCH};
 use crate::framebuffer as fb;
+use crate::keyboard::{Key, KeyEvent};
+use crate::logo;
 use crate::{diagnostics, e1000, limine, mouse, rtc, start_menu, timer};
 
 const MAX_WINDOWS: usize = 8;
-const TITLEBAR_H: usize = 36;
-const TASKBAR_H: usize = 48;
-const PAD: usize = 14;
+const TITLEBAR_H: usize = 40;
+/// Space reserved for the floating dock, including its bottom margin.
+const TASKBAR_H: usize = 80;
+const DOCK_H: usize = 64;
+const DOCK_MARGIN: usize = 8;
 
-const WALL_TOP: u32 = 0x000A_1728;
-const WALL_BOTTOM: u32 = 0x001A_3A5E;
-const WINDOW_BG: u32 = 0x001B_1B1B;
-const TITLE_ACTIVE: u32 = 0x002E_2E2E;
-const TITLE_IDLE: u32 = 0x0023_2323;
-const BORDER_ACTIVE: u32 = 0x0048_5868;
-const BORDER_IDLE: u32 = 0x0037_3B40;
-const TASKBAR_BG: u32 = 0x001C_2430;
-const TASKBAR_LINE: u32 = 0x0036_465A;
-const TASKBAR_HOVER: u32 = 0x002A_3644;
-const MENU_BG: u32 = 0x0022_2B38;
-const MENU_BORDER: u32 = 0x0041_5163;
-const MENU_TILE: u32 = 0x002A_3442;
-const MENU_TILE_HOVER: u32 = 0x0034_4254;
-const MENU_TILE_SELECTED: u32 = 0x003E_5874;
-const SEARCH_BG: u32 = 0x0016_1E27;
-const FG: u32 = 0x00F3_F3F3;
-const MUTED: u32 = 0x00A0_A8B0;
-const DIM: u32 = 0x0070_7880;
+const WALL_TOP: u32 = 0x0006_0C18;
+const WALL_BOTTOM: u32 = 0x0014_2742;
+const WINDOW_BG: u32 = 0x0011_1721;
+const TERM_BG: u32 = 0x0008_0D16;
+const TERM_LINE: u32 = 0x0023_3042;
+const TITLE_ACTIVE: u32 = 0x001C_2635;
+const TITLE_IDLE: u32 = 0x0015_1D29;
+const BORDER_ACTIVE: u32 = 0x0046_5E7C;
+const BORDER_IDLE: u32 = 0x0026_313F;
+const TASKBAR_BG: u32 = 0x0017_212E;
+const TASKBAR_LINE: u32 = 0x0038_4A60;
+const TASKBAR_HOVER: u32 = 0x0028_3648;
+const MENU_BG: u32 = 0x0017_202C;
+const MENU_BORDER: u32 = 0x0039_4C62;
+const MENU_TILE: u32 = 0x001E_2836;
+const MENU_TILE_HOVER: u32 = 0x002B_3849;
+const MENU_TILE_SELECTED: u32 = 0x0032_4A66;
+const SEARCH_BG: u32 = 0x0011_1923;
+const CARD_BG: u32 = 0x0018_2130;
+const CARD_LINE: u32 = 0x0028_3546;
+const FG: u32 = 0x00F5_F7FA;
+const MUTED: u32 = 0x009A_A7B8;
+const DIM: u32 = 0x006B_778A;
 const CLOSE_HOVER: u32 = 0x00E8_1111;
-const SHADOW: u32 = 0x0006_0D16;
+const SHADOW: u32 = 0x0002_060C;
 
 const ACCENTS: [u32; 4] = [0x0000_78D4, 0x0003_8387, 0x0087_64B8, 0x00CA_5010];
+const ACCENT_NAMES: [&str; 4] = ["Azure", "Teal", "Violet", "Amber"];
 
 static DIRTY: AtomicBool = AtomicBool::new(false);
+static SAFE_MODE: AtomicBool = AtomicBool::new(false);
 static NEXT_FRAME: AtomicU64 = AtomicU64::new(0);
 static LAST_CARET: AtomicBool = AtomicBool::new(false);
 static LAST_MINUTE: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -130,6 +140,7 @@ struct Wm {
     height: usize,
     wallpaper: Vec<u32>,
     frame: Vec<u32>,
+    presented: Vec<u32>,
     windows: [Option<Window>; MAX_WINDOWS],
     order: [usize; MAX_WINDOWS],
     order_len: usize,
@@ -146,6 +157,7 @@ impl Wm {
             height: 0,
             wallpaper: Vec::new(),
             frame: Vec::new(),
+            presented: Vec::new(),
             windows: [None; MAX_WINDOWS],
             order: [0; MAX_WINDOWS],
             order_len: 0,
@@ -239,25 +251,138 @@ fn rounded_rect(
         return;
     }
     let r = radius.min(w / 2).min(h / 2);
-    for dy in 0..h {
-        let inset = if dy < r {
-            r - dy
-        } else if h > r && dy >= h - r {
-            dy - (h - r) + 1
-        } else {
-            0
-        };
+    if r == 0 {
+        fill(frame, stride, height, x, y, w, h, color);
+        return;
+    }
+
+    // Straight bands: the middle spans the full width, while the top and
+    // bottom strips stop short of the rounded corners.
+    fill(
+        frame,
+        stride,
+        height,
+        x,
+        y + r as i32,
+        w,
+        h.saturating_sub(r * 2),
+        color,
+    );
+    let middle_w = w.saturating_sub(r * 2);
+    if middle_w > 0 {
+        fill(frame, stride, height, x + r as i32, y, middle_w, r, color);
         fill(
             frame,
             stride,
             height,
-            x + inset as i32,
-            y + dy as i32,
-            w.saturating_sub(inset * 2),
-            1,
+            x + r as i32,
+            y + (h - r) as i32,
+            middle_w,
+            r,
             color,
         );
     }
+
+    // Corner blocks with one-pixel coverage anti-aliasing. Pixel centres are
+    // measured against the corner circle, then the colour is blended by the
+    // fraction of the pixel that falls inside the shape. Integer square roots
+    // keep the kernel free of floating-point support.
+    for (corner_x, corner_y) in [
+        (x, y),
+        (x + (w - r) as i32, y),
+        (x, y + (h - r) as i32),
+        (x + (w - r) as i32, y + (h - r) as i32),
+    ] {
+        for dy in 0..r {
+            let py = corner_y + dy as i32;
+            if py < 0 || py as usize >= height {
+                continue;
+            }
+            let fy = (2 * r) as i64 - 2 * dy as i64 - 1;
+            for dx in 0..r {
+                let px = corner_x + dx as i32;
+                if px < 0 || px as usize >= stride {
+                    continue;
+                }
+                let fx = (2 * r) as i64 - 2 * dx as i64 - 1;
+                let distance = isqrt(((fx * fx + fy * fy) as u64) << 8) as i64;
+                let alpha = ((((2 * r as i64 + 1) * 16) - distance) * 255 / 32)
+                    .clamp(0, 255) as u8;
+                if alpha == 0 {
+                    continue;
+                }
+                let index = py as usize * stride + px as usize;
+                if alpha >= 254 {
+                    frame[index] = color;
+                } else {
+                    frame[index] = blend(frame[index], color, alpha);
+                }
+            }
+        }
+    }
+}
+
+/// Blend a solid colour into a clipped rectangle.
+fn blend_rect(
+    frame: &mut [u32],
+    stride: usize,
+    height: usize,
+    x: i32,
+    y: i32,
+    w: usize,
+    h: usize,
+    color: u32,
+    alpha: u8,
+) {
+    if w == 0 || h == 0 || alpha == 0 {
+        return;
+    }
+    let x0 = x.max(0) as usize;
+    let y0 = y.max(0) as usize;
+    let x1 = ((x as i64 + w as i64).clamp(0, stride as i64)) as usize;
+    let y1 = ((y as i64 + h as i64).clamp(0, height as i64)) as usize;
+    for row in y0..y1 {
+        let start = row * stride;
+        for column in x0..x1 {
+            frame[start + column] = blend(frame[start + column], color, alpha);
+        }
+    }
+}
+
+/// Soft drop shadow built from translucent edge bands, so the cost stays
+/// proportional to the window perimeter rather than its area.
+fn soft_shadow(
+    frame: &mut [u32],
+    stride: usize,
+    height: usize,
+    x: i32,
+    y: i32,
+    w: usize,
+    h: usize,
+) {
+    const SHADOW_COLOR: u32 = SHADOW;
+    for (spread, alpha) in [(12i32, 22u8), (6, 34u8)] {
+        let left = x + 4 - spread;
+        let right = x + 4 + w as i32;
+        blend_rect(frame, stride, height, left, y + 10, spread as usize, h, SHADOW_COLOR, alpha);
+        blend_rect(frame, stride, height, right, y + 10, spread as usize, h, SHADOW_COLOR, alpha);
+        blend_rect(frame, stride, height, x + 10, y + 6 - spread, w.saturating_sub(10), spread as usize, SHADOW_COLOR, alpha);
+        blend_rect(frame, stride, height, x + 10, y + 6 + h as i32, w.saturating_sub(10), spread as usize, SHADOW_COLOR, alpha);
+    }
+}
+
+/// Integer square root, used by the rounded-rectangle coverage calculation.
+fn isqrt(value: u64) -> u64 {
+    if value == 0 {
+        return 0;
+    }
+    let mut x = value;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + value / x) / 2;
+    }
+    x
 }
 
 fn put(frame: &mut [u32], stride: usize, height: usize, x: i32, y: i32, color: u32) {
@@ -462,6 +587,16 @@ pub fn initialized() -> bool {
     WM.lock().initialized
 }
 
+/// Reduce visual effects for the "safe graphics" Limine entry.
+pub fn set_safe_mode(enabled: bool) {
+    SAFE_MODE.store(enabled, Ordering::Relaxed);
+}
+
+/// Whether the compositor is running with reduced effects.
+pub fn safe_mode() -> bool {
+    SAFE_MODE.load(Ordering::Relaxed)
+}
+
 /// Mark the desktop as needing a repaint.
 pub fn invalidate() {
     DIRTY.store(true, Ordering::Release);
@@ -486,6 +621,7 @@ pub fn init() {
     let mut frame = vec![0u32; width.saturating_mul(height)];
     frame.copy_from_slice(&wm.wallpaper);
     wm.frame = frame;
+    wm.presented = Vec::new();
     wm.initialized = true;
     wm.open_window(WindowKind::Terminal);
     drop(wm);
@@ -509,7 +645,7 @@ pub fn render_now() {
     render();
 }
 
-/// Called from the shell loop. Rates-limit redraws to roughly 50 Hz.
+/// Called from the shell loop. Rates-limit redraws to roughly 100 Hz.
 pub fn tick() {
     if !initialized() {
         return;
@@ -538,7 +674,7 @@ pub fn tick() {
     if now < NEXT_FRAME.load(Ordering::Relaxed) {
         return;
     }
-    NEXT_FRAME.store(now + 2, Ordering::Relaxed);
+    NEXT_FRAME.store(now + 1, Ordering::Relaxed);
     render();
 }
 
@@ -553,51 +689,49 @@ pub fn toggle_menu() {
 
 /// Keyboard handling while the Start menu is open. Returns an action that must
 /// be executed after the caller releases all window-manager locks.
-pub fn menu_key(scancode: Option<u8>, ascii: Option<u8>) -> Action {
-    if !start_menu::is_open() {
+pub fn menu_key(event: KeyEvent) -> Action {
+    if !start_menu::is_open() || !event.pressed {
         return Action::None;
     }
 
-    match scancode {
-        Some(0x01) => {
+    match event.key {
+        Key::Escape => {
             start_menu::close();
             invalidate();
             Action::None
         }
-        Some(0x48) => {
+        Key::Up => {
             start_menu::move_selection(-2);
             invalidate();
             Action::None
         }
-        Some(0x50) => {
+        Key::Down => {
             start_menu::move_selection(2);
             invalidate();
             Action::None
         }
-        Some(0x4B) => {
+        Key::Left => {
             start_menu::move_selection(-1);
             invalidate();
             Action::None
         }
-        Some(0x4D) => {
+        Key::Right => {
             start_menu::move_selection(1);
             invalidate();
             Action::None
         }
-        _ => match ascii {
-            Some(b'\r') | Some(b'\n') => activate_selected(),
-            Some(0x08) => {
-                start_menu::backspace();
-                invalidate();
-                Action::None
-            }
-            Some(byte) if (0x20..=0x7E).contains(&byte) => {
-                start_menu::type_char(byte);
-                invalidate();
-                Action::None
-            }
-            _ => Action::None,
-        },
+        Key::Enter => activate_selected(),
+        Key::Backspace => {
+            start_menu::backspace();
+            invalidate();
+            Action::None
+        }
+        Key::Char(byte) if (0x20..=0x7E).contains(&byte) => {
+            start_menu::type_char(byte);
+            invalidate();
+            Action::None
+        }
+        _ => Action::None,
     }
 }
 
@@ -640,6 +774,12 @@ pub fn pump() -> Action {
                 if wm.dragging.is_some() || wm.resizing.is_some() {
                     wm.dragging = None;
                     wm.resizing = None;
+                    invalidate();
+                }
+            }
+            mouse::EVENT_WHEEL => {
+                if wm.terminal_at(event.x, event.y) {
+                    fb::scroll_lines(event.scroll * 3);
                     invalidate();
                 }
             }
@@ -707,7 +847,40 @@ fn render() {
     }
     draw_cursor(&mut frame, wm.width, wm.height, mouse_x, mouse_y);
 
-    fb::present(&frame);
+    let stride = wm.width;
+    let height = wm.height;
+    let full = fb::take_display_changed()
+        || wm.presented.len() != stride.saturating_mul(height);
+    if full {
+        fb::present(&frame);
+        wm.presented.clear();
+        wm.presented.extend_from_slice(&frame);
+    } else {
+        // Present and remember contiguous runs of changed rows. Idle frames
+        // therefore leave VRAM untouched, while a moving cursor costs only the
+        // rows it crosses.
+        let mut y = 0usize;
+        while y < height {
+            let start = y * stride;
+            let end = start + stride;
+            if frame[start..end] == wm.presented[start..end] {
+                y += 1;
+                continue;
+            }
+            let run_start = y;
+            y += 1;
+            while y < height {
+                let row = y * stride;
+                if frame[row..row + stride] == wm.presented[row..row + stride] {
+                    break;
+                }
+                y += 1;
+            }
+            fb::present_rows(&frame, run_start, y);
+            let range = run_start * stride..y * stride;
+            wm.presented[range.clone()].copy_from_slice(&frame[range]);
+        }
+    }
     wm.frame = frame;
 }
 
@@ -797,15 +970,15 @@ impl Wm {
             ),
             WindowKind::Monitor => (
                 560usize.min(self.width.saturating_sub(100)).max(380),
-                360usize.min(available_h.saturating_sub(80)).max(260),
+                460usize.min(available_h.saturating_sub(60)).max(300),
             ),
             WindowKind::Settings => (
                 600usize.min(self.width.saturating_sub(100)).max(380),
-                440usize.min(available_h.saturating_sub(80)).max(280),
+                470usize.min(available_h.saturating_sub(60)).max(320),
             ),
             WindowKind::About => (
                 480usize.min(self.width.saturating_sub(100)).max(340),
-                320usize.min(available_h.saturating_sub(80)).max(240),
+                360usize.min(available_h.saturating_sub(80)).max(280),
             ),
         };
         let (x, y) = match kind {
@@ -1015,6 +1188,22 @@ impl Wm {
         }
     }
 
+    /// Whether the point lies inside a visible terminal window.
+    fn terminal_at(&self, x: i32, y: i32) -> bool {
+        for position in 0..self.order_len {
+            let index = self.order[position];
+            if let Some(window) = self.windows[index] {
+                if !window.minimized
+                    && window.kind == WindowKind::Terminal
+                    && window_contains(&window, x, y)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn launch(&mut self, app: usize) -> Action {
         match app {
             0 => self.open_window(WindowKind::Terminal),
@@ -1050,7 +1239,7 @@ impl Wm {
                 return Hit::TaskbarApp(index);
             }
         }
-        if y >= taskbar.ty {
+        if taskbar.panel.contains(x, y) {
             return Hit::Taskbar;
         }
 
@@ -1125,14 +1314,15 @@ impl Wm {
             return;
         }
 
-        // Drop shadow, border and surfaces.
-        if !window.maximized {
-            rounded_rect(frame, stride, height, x + 7, y + 9, w, h, 12, SHADOW);
+        // Drop shadow, border and surfaces. A perimeter shadow keeps the
+        // wallpaper visible around the window instead of painting a black slab.
+        if !window.maximized && !safe_mode() {
+            soft_shadow(frame, stride, height, x, y, w, h);
         }
         let border = if active { BORDER_ACTIVE } else { BORDER_IDLE };
-        rounded_rect(frame, stride, height, x, y, w, h, 10, border);
+        rounded_rect(frame, stride, height, x, y, w, h, 12, border);
         let title_bg = if active { TITLE_ACTIVE } else { TITLE_IDLE };
-        rounded_rect(frame, stride, height, x + 1, y + 1, w - 2, h - 2, 9, title_bg);
+        rounded_rect(frame, stride, height, x + 1, y + 1, w - 2, h - 2, 11, title_bg);
         rounded_rect(
             frame,
             stride,
@@ -1141,7 +1331,7 @@ impl Wm {
             y + TITLEBAR_H as i32,
             w - 2,
             h - TITLEBAR_H - 1,
-            9,
+            11,
             WINDOW_BG,
         );
         fill(
@@ -1164,14 +1354,25 @@ impl Wm {
             1,
             border,
         );
+        // A faint sheen across the title bar separates it from the body.
+        fill(
+            frame,
+            stride,
+            height,
+            x + 12,
+            y + 1,
+            w.saturating_sub(24),
+            1,
+            0x0032_4258,
+        );
         if active {
             fill(
                 frame,
                 stride,
                 height,
-                x + 10,
+                x + 14,
                 y,
-                w.saturating_sub(20),
+                w.saturating_sub(28),
                 2,
                 self.accent,
             );
@@ -1179,14 +1380,14 @@ impl Wm {
 
         // App icon and title.
         let icon_x = x + 12;
-        let icon_y = y + (TITLEBAR_H as i32 - 20) / 2;
-        rounded_rect(frame, stride, height, icon_x, icon_y, 20, 20, 5, window.kind.color());
+        let icon_y = y + (TITLEBAR_H as i32 - 22) / 2;
+        rounded_rect(frame, stride, height, icon_x, icon_y, 22, 22, 6, window.kind.color());
         draw_glyph(
             frame,
             stride,
             height,
-            icon_x + (20 - GLYPH_WIDTH as i32) / 2,
-            icon_y + (20 - GLYPH_HEIGHT as i32) / 2,
+            icon_x + (22 - GLYPH_WIDTH as i32) / 2,
+            icon_y + (22 - GLYPH_HEIGHT as i32) / 2,
             window.kind.letter(),
             0x00FF_FFFF,
         );
@@ -1195,41 +1396,42 @@ impl Wm {
             frame,
             stride,
             height,
-            x + 38,
+            x + 42,
             y + (TITLEBAR_H as i32 - GLYPH_HEIGHT as i32) / 2,
             x + w as i32 - 160,
             window.kind.title(),
             title_color,
         );
 
-        // Window controls with hover feedback.
+        // Window controls with rounded hover pills.
         let controls = control_rects(window);
         for (control, glyph) in controls.iter().zip(["min", "max", "close"].iter()) {
             let hovered = control.contains(mouse_x, mouse_y);
-            let background = if hovered {
-                if *glyph == "close" {
+            if hovered {
+                let background = if *glyph == "close" {
                     CLOSE_HOVER
                 } else {
-                    0x0038_3838
-                }
-            } else {
-                title_bg
-            };
-            if hovered || *glyph == "close" {
-                fill(
+                    0x0032_3F50
+                };
+                rounded_rect(
                     frame,
                     stride,
                     height,
-                    control.x,
-                    control.y,
-                    control.w,
-                    control.h,
+                    control.x + 5,
+                    control.y + 5,
+                    control.w.saturating_sub(10),
+                    control.h.saturating_sub(10),
+                    7,
                     background,
                 );
             }
             let center_x = control.x + control.w as i32 / 2;
             let center_y = control.y + control.h as i32 / 2;
-            let color = if *glyph == "close" { 0x00FF_FFFF } else { MUTED };
+            let color = if *glyph == "close" || hovered {
+                0x00FF_FFFF
+            } else {
+                MUTED
+            };
             match *glyph {
                 "min" => fill(frame, stride, height, center_x - 6, center_y, 12, 2, color),
                 "max" => {
@@ -1292,20 +1494,41 @@ impl Wm {
 
     fn draw_terminal(&self, frame: &mut [u32], window: &Window, active: bool) {
         let (stride, height) = (self.width, self.height);
-        let left = (window.x + 1 + PAD as i32).max(0);
-        let top = (window.y + TITLEBAR_H as i32 + 12).max(0);
-        let right = (window.x + window.w as i32 - PAD as i32).min(stride as i32);
-        let bottom = (window.y + window.h as i32 - 12).min(height as i32);
+
+        // Inset console panel: the terminal reads as a recessed dark well
+        // inside the window rather than text painted directly on the chrome.
+        let panel_x = window.x + 12;
+        let panel_y = window.y + TITLEBAR_H as i32 + 10;
+        let panel_w = window.w.saturating_sub(24);
+        let panel_h = window.h.saturating_sub(TITLEBAR_H + 22);
+        if panel_w < 40 || panel_h < 40 {
+            return;
+        }
+        rounded_rect(
+            frame, stride, height, panel_x, panel_y, panel_w, panel_h, 9, TERM_LINE,
+        );
+        rounded_rect(
+            frame,
+            stride,
+            height,
+            panel_x + 1,
+            panel_y + 1,
+            panel_w - 2,
+            panel_h - 2,
+            8,
+            TERM_BG,
+        );
+
+        let left = panel_x + 10;
+        let top = panel_y + 8;
+        let right = panel_x + panel_w as i32 - 10;
+        let bottom = panel_y + panel_h as i32 - 8;
         if right <= left || bottom <= top {
             return;
         }
 
-        let content_w = window.w.saturating_sub(2 + PAD * 2);
-        let content_h = window
-            .h
-            .saturating_sub(TITLEBAR_H + 1 + 24);
-        let columns = (content_w / COL_PITCH).clamp(1, 100);
-        let rows = (content_h / ROW_PITCH).clamp(1, 40);
+        let columns = (((right - left) as usize) / COL_PITCH).clamp(1, 100);
+        let rows = (((bottom - top) as usize) / ROW_PITCH).clamp(1, 40);
         fb::set_console_size(columns, rows);
 
         let clip_w = (right - left) as usize;
@@ -1321,7 +1544,7 @@ impl Wm {
             FG,
         );
 
-        if active && (timer::ticks() / 25) % 2 == 0 {
+        if active && fb::scroll_offset() == 0 && (timer::ticks() / 25) % 2 == 0 {
             let (column, row) = fb::console_cursor();
             if column < columns && row < rows {
                 let caret_x = left + (column * COL_PITCH) as i32;
@@ -1340,51 +1563,144 @@ impl Wm {
                 }
             }
         }
+
+        let offset = fb::scroll_offset();
+        if offset > 0 {
+            let label = "SCROLLBACK";
+            let pill_w = label.len() * COL_PITCH + 20;
+            let pill_x = right - pill_w as i32 - 10;
+            let pill_y = bottom - 28;
+            rounded_rect(
+                frame,
+                stride,
+                height,
+                pill_x,
+                pill_y,
+                pill_w,
+                22,
+                9,
+                0x002A_3644,
+            );
+            draw_text(
+                frame,
+                stride,
+                height,
+                pill_x + 10,
+                pill_y + 1,
+                pill_x + pill_w as i32,
+                label,
+                self.accent,
+            );
+        }
+    }
+
+    /// Draw a rounded card surface with an accent section title.
+    fn card(
+        &self,
+        frame: &mut [u32],
+        x: i32,
+        y: i32,
+        w: usize,
+        h: usize,
+        title: &str,
+    ) {
+        let stride = self.width;
+        let height = self.height;
+        rounded_rect(frame, stride, height, x, y, w, h, 12, CARD_LINE);
+        rounded_rect(
+            frame,
+            stride,
+            height,
+            x + 1,
+            y + 1,
+            w.saturating_sub(2),
+            h.saturating_sub(2),
+            11,
+            CARD_BG,
+        );
+        fill(
+            frame,
+            stride,
+            height,
+            x + 18,
+            y + 1,
+            w.saturating_sub(36),
+            1,
+            0x002D_3C4F,
+        );
+        draw_text(frame, stride, height, x + 14, y + 12, x + w as i32 - 14, title, self.accent);
     }
 
     fn draw_monitor(&self, frame: &mut [u32], window: &Window) {
         let stride = self.width;
         let height = self.height;
-        let x = window.x + 20;
-        let y = window.y + TITLEBAR_H as i32 + 18;
-        let max_x = window.x + window.w as i32 - 20;
-
-        draw_text(frame, stride, height, x, y, max_x, "System Monitor", self.accent);
+        let x = window.x + 16;
+        let y = window.y + TITLEBAR_H as i32 + 14;
+        let card_w = window.w.saturating_sub(32);
+        let max_x = x + card_w as i32 - 14;
+        let label_x = x + 14;
 
         let (regions, usable) = limine::memory_summary();
         let heap_kib = crate::allocator::used() as u64 / 1024;
         let (mouse_x, mouse_y) = mouse::position();
 
+        // System card.
+        self.card(frame, x, y, card_w, 116, "System");
         let mut value = TextBuffer::new();
         value.push_dec(timer::ticks() / 100);
         value.push_str(" s");
-        self.monitor_row(frame, x, y + 40, max_x, "Uptime", value.as_str());
+        self.monitor_row(frame, label_x, y + 42, max_x, "Uptime", value.as_str());
 
         let mut value = TextBuffer::new();
         value.push_dec(timer::ticks());
-        self.monitor_row(frame, x, y + 68, max_x, "Timer ticks", value.as_str());
+        self.monitor_row(frame, label_x, y + 66, max_x, "Timer ticks", value.as_str());
 
+        let boot = if limine::is_active() { "Limine native" } else { "PVH direct" };
+        self.monitor_row(frame, label_x, y + 90, max_x, "Boot path", boot);
+
+        // Memory card with a proportional usage bar.
+        let memory_y = y + 126;
+        self.card(frame, x, memory_y, card_w, 136, "Memory");
         let mut value = TextBuffer::new();
         value.push_dec(usable / (1024 * 1024));
         value.push_str(" MiB / ");
         value.push_dec(regions);
         value.push_str(" regions");
-        self.monitor_row(frame, x, y + 96, max_x, "Usable memory", value.as_str());
+        self.monitor_row(frame, label_x, memory_y + 42, max_x, "Usable", value.as_str());
 
         let mut value = TextBuffer::new();
         value.push_dec(heap_kib);
         value.push_str(" KiB");
-        self.monitor_row(frame, x, y + 124, max_x, "Compositor heap", value.as_str());
+        self.monitor_row(frame, label_x, memory_y + 66, max_x, "Compositor heap", value.as_str());
+
+        let bar_w = card_w.saturating_sub(28);
+        let bar_y = memory_y + 94;
+        rounded_rect(frame, stride, height, label_x, bar_y, bar_w, 8, 4, 0x0025_3140);
+        let filled = (crate::allocator::used() * bar_w / (16 * 1024 * 1024)).min(bar_w);
+        if filled > 0 {
+            rounded_rect(frame, stride, height, label_x, bar_y, filled, 8, 4, self.accent);
+        }
+        draw_text(
+            frame,
+            stride,
+            height,
+            label_x,
+            bar_y + 14,
+            max_x,
+            "Heap usage of the 16 MiB pool",
+            DIM,
+        );
+
+        // Display and input card.
+        let input_y = memory_y + 146;
+        self.card(frame, x, input_y, card_w, 116, "Display and input");
 
         let mut value = TextBuffer::new();
         value.push_dec(self.width as u64);
         value.push(b'x');
         value.push_dec(self.height as u64);
         value.push_str("x32");
-        self.monitor_row(frame, x, y + 152, max_x, "Display", value.as_str());
-
-        let boot = if limine::is_active() { "Limine native" } else { "PVH direct" };
-        self.monitor_row(frame, x, y + 180, max_x, "Boot path", boot);
+        self.monitor_row(frame, label_x, input_y + 42, max_x, "Display", value.as_str());
 
         let mut value = TextBuffer::new();
         if mouse::present() {
@@ -1395,22 +1711,14 @@ impl Wm {
         } else {
             value.push_str("not detected");
         }
-        self.monitor_row(frame, x, y + 208, max_x, "Mouse", value.as_str());
-
-        // Heap bar: 16 MiB total.
-        let bar_y = y + 246;
-        fill(frame, stride, height, x, bar_y, 360, 10, 0x002A_2A2A);
-        let filled = (crate::allocator::used() * 360 / (16 * 1024 * 1024)).min(360);
-        fill(frame, stride, height, x, bar_y, filled, 10, self.accent);
-        draw_text(
+        self.monitor_row(frame, label_x, input_y + 66, max_x, "Mouse", value.as_str());
+        self.monitor_row(
             frame,
-            stride,
-            height,
-            x,
-            bar_y + 18,
+            label_x,
+            input_y + 90,
             max_x,
-            "Heap usage (16 MiB pool)",
-            DIM,
+            "Keyboard",
+            crate::keyboard::source(),
         );
     }
 
@@ -1424,36 +1732,36 @@ impl Wm {
         value: &str,
     ) {
         draw_text(frame, self.width, self.height, x, y, max_x, label, MUTED);
-        draw_text(frame, self.width, self.height, x + 260, y, max_x, value, FG);
+        draw_text(frame, self.width, self.height, x + 230, y, max_x, value, FG);
     }
 
     fn draw_settings(&self, frame: &mut [u32], window: &Window, mouse_x: i32, mouse_y: i32) {
         let stride = self.width;
         let height = self.height;
-        let x = window.x + 20;
-        let y = window.y + TITLEBAR_H as i32 + 18;
-        let max_x = window.x + window.w as i32 - 20;
+        let x = window.x + 16;
+        let y = window.y + TITLEBAR_H as i32 + 14;
+        let card_w = window.w.saturating_sub(32);
+        let max_x = x + card_w as i32 - 14;
+        let label_x = x + 14;
 
-        draw_text(frame, stride, height, x, y, max_x, "Appearance", self.accent);
-        self.monitor_row(frame, x, y + 40, max_x, "Theme", "Fluent Dark");
-        self.monitor_row(frame, x, y + 68, max_x, "Accent", "");
+        // Appearance card.
+        self.card(frame, x, y, card_w, 142, "Appearance");
+        self.monitor_row(frame, label_x, y + 42, max_x, "Theme", "Fluent Dark");
+
+        let accent_index = ACCENTS
+            .iter()
+            .position(|color| *color == self.accent)
+            .unwrap_or(0);
         let mut accent = TextBuffer::new();
         accent.push_hex_rgb(self.accent);
-        draw_text(
-            frame,
-            stride,
-            height,
-            x + 260,
-            y + 68,
-            max_x,
-            accent.as_str(),
-            FG,
-        );
+        accent.push(b' ');
+        accent.push_str(ACCENT_NAMES[accent_index]);
+        self.monitor_row(frame, label_x, y + 66, max_x, "Accent", accent.as_str());
 
         let swatches = settings_swatches(window);
         for (index, swatch) in swatches.iter().enumerate() {
             let selected = ACCENTS[index] == self.accent;
-            let border = if selected { FG } else { 0x004A_4A4A };
+            let border = if selected { FG } else { 0x004A_5B70 };
             rounded_rect(
                 frame,
                 stride,
@@ -1462,7 +1770,7 @@ impl Wm {
                 swatch.y - 2,
                 swatch.w + 4,
                 swatch.h + 4,
-                5,
+                6,
                 border,
             );
             rounded_rect(
@@ -1502,31 +1810,76 @@ impl Wm {
             }
         }
 
-        draw_text(frame, stride, height, x, y + 140, max_x, "Display", self.accent);
+        // Display card.
+        let display_y = y + 152;
+        self.card(frame, x, display_y, card_w, 112, "Display");
         let mut resolution = TextBuffer::new();
         resolution.push_dec(self.width as u64);
         resolution.push(b'x');
         resolution.push_dec(self.height as u64);
         resolution.push_str("x32");
-        self.monitor_row(frame, x, y + 176, max_x, "Resolution", resolution.as_str());
+        self.monitor_row(
+            frame,
+            label_x,
+            display_y + 42,
+            max_x,
+            "Resolution",
+            resolution.as_str(),
+        );
         let orientation = match fb::orientation() {
             (false, false) => "Normal",
             (true, false) => "Mirror X",
             (true, true) => "Rotated 180",
             (false, true) => "Flip Y",
         };
-        self.monitor_row(frame, x, y + 204, max_x, "Orientation", orientation);
-
-        draw_text(frame, stride, height, x, y + 248, max_x, "Input", self.accent);
         self.monitor_row(
             frame,
-            x,
-            y + 284,
+            label_x,
+            display_y + 66,
+            max_x,
+            "Orientation",
+            orientation,
+        );
+
+        // Input card.
+        let input_y = display_y + 122;
+        self.card(frame, x, input_y, card_w, 116, "Input");
+        self.monitor_row(
+            frame,
+            label_x,
+            input_y + 42,
             max_x,
             "Mouse",
             if mouse::present() { mouse::source() } else { "not detected" },
         );
-        self.monitor_row(frame, x, y + 312, max_x, "Keyboard", "PS/2 scancode set 1");
+        self.monitor_row(
+            frame,
+            label_x,
+            input_y + 66,
+            max_x,
+            "Keyboard",
+            if crate::keyboard::present() {
+                crate::keyboard::source()
+            } else {
+                "not detected"
+            },
+        );
+        self.monitor_row(
+            frame,
+            label_x,
+            input_y + 90,
+            max_x,
+            "USB input",
+            if crate::usb::present() {
+                if crate::usb::keyboard_present() {
+                    "Keyboard + mouse"
+                } else {
+                    "Boot mouse"
+                }
+            } else {
+                "No UHCI controller"
+            },
+        );
     }
 
     fn draw_about(&self, frame: &mut [u32], window: &Window) {
@@ -1534,29 +1887,39 @@ impl Wm {
         let height = self.height;
         let center = window.x + window.w as i32 / 2;
         let x = window.x + 24;
-        let y = window.y + TITLEBAR_H as i32 + 22;
+        let top = window.y + TITLEBAR_H as i32 + 12;
         let max_x = window.x + window.w as i32 - 24;
 
+        // The brand mark anchors the window; text follows beneath it.
+        logo::draw(
+            frame,
+            stride,
+            height,
+            center - 32,
+            top,
+            64,
+        );
+        let y = top + 78;
         draw_text_centered(frame, stride, height, center, y, "ZENITH OS", self.accent);
-        draw_text_centered(frame, stride, height, center, y + 30, "Version 0.1.0", FG);
+        draw_text_centered(frame, stride, height, center, y + 26, "Version 0.1.0", FG);
         draw_text_centered(
             frame,
             stride,
             height,
             center,
-            y + 58,
-            "Independent x86_64 OS",
+            y + 52,
+            "Independent x86_64 operating system",
             MUTED,
         );
-        draw_text_centered(
-            frame,
-            stride,
-            height,
-            center,
-            y + 86,
-            "Rust + assembly",
-            MUTED,
-        );
+
+        let mut boot = TextBuffer::new();
+        boot.push_str(if limine::is_active() {
+            "Limine native"
+        } else {
+            "PVH direct"
+        });
+        boot.push_str(" - ");
+        boot.push_str(limine::mode_name(limine::boot_mode()));
 
         let mut memory = TextBuffer::new();
         let (_, usable) = limine::memory_summary();
@@ -1564,13 +1927,13 @@ impl Wm {
         memory.push_str(" MiB usable");
 
         let rows = [
-            ("Boot", if limine::is_active() { "Limine native" } else { "PVH direct" }),
+            ("Boot", boot.as_str()),
             ("Display", ""),
             ("Memory", memory.as_str()),
             ("License", "MIT"),
         ];
         for (index, (label, value)) in rows.iter().enumerate() {
-            let row_y = y + 126 + index as i32 * 28;
+            let row_y = y + 82 + index as i32 * 24;
             draw_text(frame, stride, height, x, row_y, max_x, label, DIM);
             if *label == "Display" {
                 let mut display = TextBuffer::new();
@@ -1587,12 +1950,47 @@ impl Wm {
     fn draw_taskbar(&self, frame: &mut [u32], mouse_x: i32, mouse_y: i32) {
         let stride = self.width;
         let height = self.height;
-        let ty = height.saturating_sub(TASKBAR_H) as i32;
-
-        fill(frame, stride, height, 0, ty, stride, TASKBAR_H, TASKBAR_BG);
-        fill(frame, stride, height, 0, ty, stride, 1, TASKBAR_LINE);
-
         let layout = TaskbarLayout::new(self.width, self.height);
+        let panel = layout.panel;
+
+        // Floating glass dock: a soft shadow, a one-pixel rim and a slightly
+        // lighter inner surface. It hovers over the wallpaper instead of
+        // spanning the screen edge-to-edge.
+        if !safe_mode() {
+            soft_shadow(frame, stride, height, panel.x, panel.y, panel.w, panel.h);
+        }
+        rounded_rect(
+            frame,
+            stride,
+            height,
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            18,
+            TASKBAR_LINE,
+        );
+        rounded_rect(
+            frame,
+            stride,
+            height,
+            panel.x + 1,
+            panel.y + 1,
+            panel.w.saturating_sub(2),
+            panel.h.saturating_sub(2),
+            17,
+            TASKBAR_BG,
+        );
+        fill(
+            frame,
+            stride,
+            height,
+            panel.x + 18,
+            panel.y + 1,
+            panel.w.saturating_sub(36),
+            1,
+            0x002C_3D52,
+        );
 
         // Start button.
         if layout.start.contains(mouse_x, mouse_y) || start_menu::is_open() {
@@ -1600,28 +1998,22 @@ impl Wm {
                 frame,
                 stride,
                 height,
-                layout.start.x + 4,
-                layout.start.y + 4,
-                40,
-                40,
-                7,
+                layout.start.x + 2,
+                layout.start.y + 2,
+                48,
+                48,
+                12,
                 TASKBAR_HOVER,
             );
         }
-        let icon_x = layout.start.x + 14;
-        let icon_y = layout.start.y + 14;
-        for (dx, dy) in [(0i32, 0i32), (11, 0), (0, 11), (11, 11)] {
-            fill(
-                frame,
-                stride,
-                height,
-                icon_x + dx,
-                icon_y + dy,
-                8,
-                8,
-                self.accent,
-            );
-        }
+        logo::draw(
+            frame,
+            stride,
+            height,
+            layout.start.x + 7,
+            layout.start.y + 7,
+            38,
+        );
 
         // Pinned applications.
         for (index, kind) in TASKBAR_KINDS.iter().enumerate() {
@@ -1632,11 +2024,11 @@ impl Wm {
                     frame,
                     stride,
                     height,
-                    rect.x + 4,
-                    rect.y + 4,
-                    40,
-                    40,
-                    7,
+                    rect.x + 2,
+                    rect.y + 2,
+                    48,
+                    48,
+                    12,
                     TASKBAR_HOVER,
                 );
             }
@@ -1645,33 +2037,33 @@ impl Wm {
                 stride,
                 height,
                 rect.x + 9,
-                rect.y + 8,
-                30,
-                30,
-                7,
+                rect.y + 7,
+                34,
+                34,
+                9,
                 kind.color(),
             );
             draw_glyph(
                 frame,
                 stride,
                 height,
-                rect.x + 9 + (30 - GLYPH_WIDTH as i32) / 2,
-                rect.y + 8 + (30 - GLYPH_HEIGHT as i32) / 2,
+                rect.x + 9 + (34 - GLYPH_WIDTH as i32) / 2,
+                rect.y + 7 + (34 - GLYPH_HEIGHT as i32) / 2,
                 kind.letter(),
                 0x00FF_FFFF,
             );
 
-            let window = self.find(*kind).and_then(|index| self.windows[index]);
-            if let Some(window) = window {
+            if let Some(window) = self.find(*kind).and_then(|index| self.windows[index]) {
                 let focused = self.top_visible() == self.find(*kind);
                 let indicator = if focused { self.accent } else { 0x0055_6677 };
-                fill(
+                rounded_rect(
                     frame,
                     stride,
                     height,
-                    rect.x + 16,
-                    rect.y + 43,
-                    16,
+                    rect.x + 22,
+                    rect.y + 45,
+                    8,
+                    4,
                     2,
                     indicator,
                 );
@@ -1679,10 +2071,23 @@ impl Wm {
             }
         }
 
+        // Separator between the launcher cluster and the tray.
+        let separator_x = layout.apps[3].x + 52 + 12;
+        fill(
+            frame,
+            stride,
+            height,
+            separator_x,
+            panel.y + 18,
+            1,
+            28,
+            0x0030_4054,
+        );
+
         // System tray: network link indicator, then the real-time clock.
         let link_up = e1000::link_up();
-        let net_x = self.width as i32 - 150;
-        let net_y = ty + 20;
+        let net_x = panel.right() - 126;
+        let net_y = panel.y + 24;
         for (index, bar_height) in [5usize, 8, 11, 14].iter().enumerate() {
             let color = if link_up { 0x0060_C080 } else { 0x0050_5860 };
             fill(
@@ -1704,9 +2109,9 @@ impl Wm {
             frame,
             stride,
             height,
-            self.width as i32 - 24 - 5 * COL_PITCH as i32,
-            ty + 16,
-            self.width as i32 - 12,
+            panel.right() - 16 - 5 * COL_PITCH as i32,
+            panel.y + 22,
+            panel.right() - 16,
             clock.as_str(),
             FG,
         );
@@ -1752,11 +2157,12 @@ impl Wm {
             MENU_BG,
         );
 
+        logo::draw(frame, stride, height, panel.x + 20, panel.y + 10, 28);
         draw_text(
             frame,
             stride,
             height,
-            panel.x + 24,
+            panel.x + 56,
             panel.y + 18,
             panel.right(),
             "Start",
@@ -2013,24 +2419,27 @@ enum Hit {
 }
 
 struct TaskbarLayout {
-    ty: i32,
+    panel: Rect,
     start: Rect,
     apps: [Rect; 4],
 }
 
 impl TaskbarLayout {
     fn new(width: usize, height: usize) -> Self {
-        let ty = height.saturating_sub(TASKBAR_H) as i32;
-        let group_width = 5 * 48;
-        let group_x = width.saturating_sub(group_width) as i32 / 2;
+        let panel_y = height.saturating_sub(DOCK_H + DOCK_MARGIN) as i32;
+        let panel_w = 430usize.min(width.saturating_sub(24));
+        let panel_x = (width.saturating_sub(panel_w) / 2) as i32;
+        let item = 52;
+        let row_y = panel_y + (DOCK_H as i32 - item as i32) / 2;
+        let group_x = panel_x + 12;
         TaskbarLayout {
-            ty,
-            start: Rect::new(group_x, ty, 48, 48),
+            panel: Rect::new(panel_x, panel_y, panel_w, DOCK_H),
+            start: Rect::new(group_x, row_y, item as usize, item as usize),
             apps: [
-                Rect::new(group_x + 48, ty, 48, 48),
-                Rect::new(group_x + 96, ty, 48, 48),
-                Rect::new(group_x + 144, ty, 48, 48),
-                Rect::new(group_x + 192, ty, 48, 48),
+                Rect::new(group_x + 54, row_y, item as usize, item as usize),
+                Rect::new(group_x + 108, row_y, item as usize, item as usize),
+                Rect::new(group_x + 162, row_y, item as usize, item as usize),
+                Rect::new(group_x + 216, row_y, item as usize, item as usize),
             ],
         }
     }
@@ -2096,11 +2505,11 @@ fn control_rects(window: &Window) -> [Rect; 3] {
 }
 
 fn settings_swatches(window: &Window) -> [Rect; 4] {
-    let start_x = window.x + 20;
-    let start_y = window.y + TITLEBAR_H as i32 + 18 + 96;
+    let start_x = window.x + 30;
+    let start_y = window.y + TITLEBAR_H as i32 + 14 + 96;
     let mut swatches = [Rect::new(0, 0, 0, 0); 4];
     for (index, swatch) in swatches.iter_mut().enumerate() {
-        *swatch = Rect::new(start_x + index as i32 * 44, start_y, 32, 22);
+        *swatch = Rect::new(start_x + index as i32 * 46, start_y, 36, 22);
     }
     swatches
 }
@@ -2168,27 +2577,75 @@ fn build_wallpaper(width: usize, height: usize) -> Vec<u32> {
     }
 
     // Soft blue and violet blooms, in the spirit of the Windows 11 wallpaper.
-    glow(
-        &mut buffer,
-        width,
-        height,
-        (width as i64 * 32) / 100,
-        (height as i64 * 30) / 100,
-        (height as i64 * 55) / 100,
-        0x003A_6EA8,
-        34,
-    );
-    glow(
-        &mut buffer,
-        width,
-        height,
-        (width as i64 * 76) / 100,
-        (height as i64 * 72) / 100,
-        (height as i64 * 38) / 100,
-        0x005A_3A88,
-        22,
-    );
+    // Safe graphics mode keeps the plain gradient to stay light on old GPUs.
+    if !safe_mode() {
+        glow(
+            &mut buffer,
+            width,
+            height,
+            (width as i64 * 32) / 100,
+            (height as i64 * 30) / 100,
+            (height as i64 * 55) / 100,
+            0x003A_6EA8,
+            34,
+        );
+        glow(
+            &mut buffer,
+            width,
+            height,
+            (width as i64 * 76) / 100,
+            (height as i64 * 72) / 100,
+            (height as i64 * 38) / 100,
+            0x005A_3A88,
+            22,
+        );
+    }
+
+    // A dim brand watermark in the lower-right corner. It sits behind the
+    // dock and window stack, so it reads as desktop texture rather than a
+    // competing foreground element.
+    let mark = (height / 5).clamp(120, 260);
+    if width > mark + 48 && height > mark + 48 {
+        logo::draw_dim(
+            &mut buffer,
+            width,
+            height,
+            (width - mark - 36) as i32,
+            (height - mark - height / 6) as i32,
+            mark,
+            30,
+        );
+    }
+
+    dither(&mut buffer, width, height);
     buffer
+}
+
+/// Ordered 4x4 dithering: a ±1 LSB perturbation breaks up gradient banding
+/// without changing the overall palette.
+fn dither(buffer: &mut [u32], width: usize, height: usize) {
+    const BAYER: [[i32; 4]; 4] = [
+        [0, 8, 2, 10],
+        [12, 4, 14, 6],
+        [3, 11, 1, 9],
+        [15, 7, 13, 5],
+    ];
+    for y in 0..height {
+        let row = &mut buffer[y * width..(y + 1) * width];
+        for (x, pixel) in row.iter_mut().enumerate() {
+            let delta = (BAYER[y & 3][x & 3] - 8) / 8;
+            if delta == 0 {
+                continue;
+            }
+            let mut r = ((*pixel >> 16) & 0xFF) as i32 + delta;
+            let mut g = ((*pixel >> 8) & 0xFF) as i32 + delta;
+            let mut b = (*pixel & 0xFF) as i32 + delta;
+            r = r.clamp(0, 255);
+            g = g.clamp(0, 255);
+            b = b.clamp(0, 255);
+            *pixel = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+        }
+    }
 }
 
 // A classic arrow cursor: '.' outline, '#' fill, ' ' transparent.

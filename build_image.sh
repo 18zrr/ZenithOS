@@ -18,6 +18,7 @@ rm -f "$IMAGE" "$FSIMAGE"
 python3 tools/make_fat_image.py "$FSIMAGE" "$TOTAL_SECTORS" \
     kernel/kernel-limine.bin /KERNEL.BIN \
     boot/limine-native.conf /LIMINE.CONF \
+    boot/wallpaper.png /wallpaper.png \
     "$LIMINE_DIR/limine-bios.sys" /limine-bios.sys
 
 # Disk image with a single MBR partition at sector 2048 (1 MiB).

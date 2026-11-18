@@ -18,6 +18,7 @@ rm -f "$IMAGE" "$FSIMAGE"
 python3 tools/make_fat_image.py "$FSIMAGE" "$TOTAL_SECTORS" \
     kernel/kernel-limine.bin /kernel.bin \
     boot/limine-native.conf /limine.conf \
+    boot/wallpaper.png /wallpaper.png \
     "$LIMINE_DIR/BOOTX64.EFI" /EFI/BOOT/BOOTX64.EFI
 
 dd if=/dev/zero of="$IMAGE" bs=1M count=64 status=none

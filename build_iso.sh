@@ -14,6 +14,7 @@ echo "Building $OUTPUT..."
 python3 tools/make_iso.py "$OUTPUT" \
     "limine.conf=boot/limine-native.conf" \
     "kernel.bin=kernel/kernel-limine.bin" \
+    "wallpaper.png=boot/wallpaper.png" \
     "limine-bios.sys=$LIMINE_DIR/limine-bios.sys" \
     "limine-bios-cd.bin=$LIMINE_DIR/limine-bios-cd.bin"
 

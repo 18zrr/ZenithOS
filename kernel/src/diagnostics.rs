@@ -70,8 +70,31 @@ pub fn serial_put_hex(value: u64) {
 
 /// Clear the visible consoles and repaint the desktop chrome.
 pub fn clear_screen() {
+    if crate::framebuffer::recovery_active() {
+        crate::framebuffer::recovery_clear();
+        return;
+    }
     vga::clear();
     crate::framebuffer::clear_screen();
+}
+
+/// Write one byte to the currently visible console (recovery, VGA or desktop).
+fn visible_putc(byte: u8) {
+    if crate::framebuffer::recovery_active() {
+        crate::framebuffer::recovery_putc(byte);
+    } else {
+        vga::putc(byte);
+        crate::framebuffer::putc(byte);
+    }
+}
+
+fn visible_puts(message: &str) {
+    if crate::framebuffer::recovery_active() {
+        crate::framebuffer::recovery_puts(message);
+    } else {
+        vga::puts(message);
+        crate::framebuffer::puts(message);
+    }
 }
 
 /// Write one byte to COM1, waiting for room in the transmit FIFO.
@@ -96,8 +119,7 @@ pub fn puts(message: &str) {
         }
         putc(byte);
     }
-    vga::puts(message);
-    crate::framebuffer::puts(message);
+    visible_puts(message);
 }
 
 /// Print a u64 as hexadecimal with a `0x` prefix.
@@ -120,9 +142,9 @@ pub fn put_hex(value: u64) {
     for &byte in &buffer[start..] {
         putc(byte);
     }
-    vga::puts("0x");
+    visible_puts("0x");
     for &byte in &buffer[start..] {
-        vga::putc(byte);
+        visible_putc(byte);
     }
 }
 
@@ -130,8 +152,7 @@ pub fn put_hex(value: u64) {
 pub fn put_dec(value: u64) {
     if value == 0 {
         putc(b'0');
-        vga::putc(b'0');
-        crate::framebuffer::putc(b'0');
+        visible_putc(b'0');
         return;
     }
     let mut buffer = [0u8; 20];
@@ -144,8 +165,7 @@ pub fn put_dec(value: u64) {
     }
     for &byte in &buffer[start..] {
         putc(byte);
-        vga::putc(byte);
-        crate::framebuffer::putc(byte);
+        visible_putc(byte);
     }
 }
 

@@ -1,9 +1,11 @@
-//! USB host controller (UHCI) support and HID boot-mouse input.
+//! USB host controller (UHCI) support for HID keyboards and mice.
 //!
-//! The driver performs a real port reset, enumerates the device through
-//! control transfers on endpoint 0, selects the HID boot protocol, and polls
-//! the interrupt IN endpoint from the shell loop. Reports are passed to the
-//! mouse module, which merges them with PS/2 input for the window manager.
+//! The driver resets and enumerates both root ports, keeps one interrupt queue
+//! head per device, and polls the shared interrupt chain from the shell loop.
+//! Mice are upgraded to the report protocol when their report descriptor parses,
+//! which unlocks wheels and side buttons; keyboards use the HID boot protocol.
+//! Port connect-change bits are serviced on every poll, so plugging a device in
+//! or out after boot works without restarting the machine.
 
 use core::sync::atomic::{fence, Ordering};
 
@@ -23,6 +25,7 @@ const FRBASEADD: u16 = 0x08;
 const SOFMOD: u16 = 0x0C;
 const PORTSC1: u16 = 0x10;
 const PORTSC2: u16 = 0x12;
+const PORTS: [u16; 2] = [PORTSC1, PORTSC2];
 
 const CMD_RUN: u16 = 1 << 0;
 const CMD_HCRESET: u16 = 1 << 1;
@@ -41,9 +44,9 @@ const TD_TERMINATE: u32 = 1;
 const TD_DEPTH: u32 = 1 << 2;
 const TD_ACTIVE: u32 = 1 << 23;
 const TD_LOW_SPEED: u32 = 1 << 26;
-const TD_ERROR: u32 = (1 << 17) | (1 << 18) | (1 << 19) | (1 << 20) | (1 << 22);
-const TD_ACTUAL_LEN: u32 = 0x7FF;
 const TD_NAK: u32 = 1 << 19;
+const TD_ERROR: u32 = (1 << 17) | (1 << 18) | (1 << 20) | (1 << 22);
+const TD_ACTUAL_LEN: u32 = 0x7FF;
 const TD_ERROR_COUNTER: u32 = 3 << 27;
 
 const PID_IN: u32 = 0x69;
@@ -52,6 +55,8 @@ const PID_SETUP: u32 = 0x2D;
 
 const MAX_TDS: usize = 40;
 const MAX_DATA: usize = 256;
+const MAX_DEVICES: usize = 4;
+const MAX_INTERFACES: usize = 4;
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
@@ -79,6 +84,12 @@ struct QueueHead {
     reserved: [u32; 2],
 }
 
+const EMPTY_QH: QueueHead = QueueHead {
+    horizontal: TD_TERMINATE,
+    element: TD_TERMINATE,
+    reserved: [0; 2],
+};
+
 #[repr(C, align(64))]
 struct Aligned8([u8; 8]);
 
@@ -101,61 +112,94 @@ impl Aligned16 {
 struct ControllerData {
     frame_list: [u32; 1024],
     control_qh: QueueHead,
-    interrupt_qh: QueueHead,
+    interrupt_qh: [QueueHead; MAX_DEVICES],
     control_tds: [TransferDescriptor; MAX_TDS],
-    mouse_td: TransferDescriptor,
+    interrupt_tds: [TransferDescriptor; MAX_DEVICES],
+    reports: [Aligned16; MAX_DEVICES],
     setup: Aligned8,
     status: Aligned8,
-    report: Aligned16,
     data: [u8; MAX_DATA],
 }
 
 static mut CONTROLLER: ControllerData = ControllerData {
     frame_list: [TD_TERMINATE; 1024],
-    control_qh: QueueHead {
-        horizontal: TD_TERMINATE,
-        element: TD_TERMINATE,
-        reserved: [0; 2],
-    },
-    interrupt_qh: QueueHead {
-        horizontal: TD_TERMINATE,
-        element: TD_TERMINATE,
-        reserved: [0; 2],
-    },
+    control_qh: EMPTY_QH,
+    interrupt_qh: [EMPTY_QH; MAX_DEVICES],
     control_tds: [EMPTY_TD; MAX_TDS],
-    mouse_td: EMPTY_TD,
+    interrupt_tds: [EMPTY_TD; MAX_DEVICES],
+    reports: [Aligned16::new(), Aligned16::new(), Aligned16::new(), Aligned16::new()],
     setup: Aligned8::new(),
     status: Aligned8::new(),
-    report: Aligned16::new(),
     data: [0; MAX_DATA],
 };
 
-#[derive(Clone, Copy)]
-struct UsbMouse {
-    ready: bool,
-    base: u16,
-    address: u8,
-    endpoint: u8,
-    max_packet: usize,
-    toggle: bool,
-    low_speed: bool,
-    pending_error: bool,
-    reports: u32,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeviceKind {
+    Keyboard,
+    Mouse,
 }
 
-static mut USB_MOUSE: UsbMouse = UsbMouse {
-    ready: false,
-    base: 0,
-    address: 0,
-    endpoint: 0,
-    max_packet: 0,
-    toggle: false,
-    low_speed: false,
-    pending_error: false,
-    reports: 0,
-};
+struct UsbDevice {
+    used: bool,
+    kind: DeviceKind,
+    base: u16,
+    port: u8,
+    address: u8,
+    endpoint: u8,
+    interface: u8,
+    max_packet: usize,
+    interval: u8,
+    low_speed: bool,
+    toggle: bool,
+    pending_error: bool,
+    reports: u32,
+    report_protocol: bool,
+    layout: zenith_hid::MouseLayout,
+    last_leds: u8,
+}
+
+impl UsbDevice {
+    const fn new() -> Self {
+        UsbDevice {
+            used: false,
+            kind: DeviceKind::Mouse,
+            base: 0,
+            port: 0,
+            address: 0,
+            endpoint: 0,
+            interface: 0,
+            max_packet: 0,
+            interval: 0,
+            low_speed: false,
+            toggle: false,
+            pending_error: false,
+            reports: 0,
+            report_protocol: false,
+            layout: zenith_hid::MouseLayout {
+                report_id: 0,
+                has_report_id: false,
+                buttons: 0,
+                button_offset: 0,
+                x: zenith_hid::Field { offset: 0, size: 0, signed: false },
+                y: zenith_hid::Field { offset: 0, size: 0, signed: false },
+                wheel: zenith_hid::Field { offset: 0, size: 0, signed: false },
+                pan: zenith_hid::Field { offset: 0, size: 0, signed: false },
+            },
+            last_leds: 0,
+        }
+    }
+}
+
+static mut DEVICES: [UsbDevice; MAX_DEVICES] = [
+    UsbDevice::new(),
+    UsbDevice::new(),
+    UsbDevice::new(),
+    UsbDevice::new(),
+];
 
 static mut CONTROLLER_COUNT: u32 = 0;
+static mut CONTROLLER_BASE: u16 = 0;
+static mut NEXT_ADDRESS: u8 = 1;
 
 fn physical(address: usize) -> u64 {
     crate::limine::physical(address)
@@ -178,8 +222,16 @@ unsafe fn wait_ticks(count: u64) {
     }
 }
 
+fn device(index: usize) -> *mut UsbDevice {
+    unsafe { core::ptr::addr_of_mut!(DEVICES[index]) }
+}
+
+fn controller() -> *mut ControllerData {
+    core::ptr::addr_of_mut!(CONTROLLER)
+}
+
 /// Scan all PCI functions for USB controllers and initialise the first UHCI
-/// controller that has a device attached.
+/// controller. Devices present at boot are enumerated immediately.
 pub fn detect() {
     let mut count = 0u32;
     for slot in 0..32u8 {
@@ -233,9 +285,16 @@ pub fn detect() {
     diagnostics::puts("[usb] controllers found: ");
     diagnostics::put_hex(count as u64);
     diagnostics::puts("\n");
+
+    let base = unsafe { CONTROLLER_BASE };
+    if base != 0 {
+        for (index, port) in PORTS.iter().enumerate() {
+            unsafe { service_port(base, index, *port, true) };
+        }
+    }
 }
 
-/// Reset and initialise a UHCI controller, then enumerate both root ports.
+/// Reset and initialise a UHCI controller.
 unsafe fn init_uhci(base: u16) -> bool {
     if CONTROLLER_COUNT != 0 {
         diagnostics::println("[usb] extra UHCI controller ignored");
@@ -255,11 +314,8 @@ unsafe fn init_uhci(base: u16) -> bool {
     outw(base + USBINTR, 0);
     outw(base + USBSTS, 0xFFFF);
 
-    let data = core::ptr::addr_of_mut!(CONTROLLER);
-    let control_qh_phys =
-        physical(core::ptr::addr_of_mut!((*data).control_qh) as usize) as u32;
-    let interrupt_qh_phys =
-        physical(core::ptr::addr_of_mut!((*data).interrupt_qh) as usize) as u32;
+    let data = controller();
+    let control_qh_phys = physical(core::ptr::addr_of_mut!((*data).control_qh) as usize) as u32;
     let list_phys = physical(core::ptr::addr_of_mut!((*data).frame_list) as usize);
 
     for entry in core::ptr::addr_of_mut!((*data).frame_list)
@@ -269,10 +325,11 @@ unsafe fn init_uhci(base: u16) -> bool {
     {
         *entry = control_qh_phys | 0x2; // queue head
     }
-    (*core::ptr::addr_of_mut!((*data).control_qh)).horizontal = interrupt_qh_phys | 0x2;
-    (*core::ptr::addr_of_mut!((*data).control_qh)).element = TD_TERMINATE;
-    (*core::ptr::addr_of_mut!((*data).interrupt_qh)).horizontal = TD_TERMINATE;
-    (*core::ptr::addr_of_mut!((*data).interrupt_qh)).element = TD_TERMINATE;
+    (*data).control_qh.horizontal = TD_TERMINATE;
+    (*data).control_qh.element = TD_TERMINATE;
+    for index in 0..MAX_DEVICES {
+        (*data).interrupt_qh[index] = EMPTY_QH;
+    }
 
     outw(base + FRNUM, 0);
     outl(base + FRBASEADD, list_phys as u32);
@@ -281,7 +338,7 @@ unsafe fn init_uhci(base: u16) -> bool {
     wait_ticks(2);
 
     CONTROLLER_COUNT = 1;
-    (*core::ptr::addr_of_mut!(USB_MOUSE)).base = base;
+    CONTROLLER_BASE = base;
 
     let status = inw(base + USBSTS);
     if status & STS_HCH != 0 {
@@ -289,35 +346,7 @@ unsafe fn init_uhci(base: u16) -> bool {
         diagnostics::put_hex(status as u64);
         diagnostics::puts("\n");
     }
-
-    for (index, port) in [PORTSC1, PORTSC2].iter().enumerate() {
-        diagnostics::puts("[usb] port ");
-        diagnostics::put_dec(index as u64);
-        diagnostics::puts(" initial=");
-        diagnostics::put_hex(inw(base + *port) as u64);
-        diagnostics::puts("\n");
-
-        let Some(status) = reset_port(base, *port) else {
-            continue;
-        };
-        if status & PORT_CCS == 0 {
-            continue;
-        }
-        let low_speed = status & PORT_LSDA != 0;
-        diagnostics::puts("[usb] port ");
-        diagnostics::put_dec(index as u64);
-        diagnostics::puts(" enabled status=");
-        diagnostics::put_hex(status as u64);
-        diagnostics::puts(" speed=");
-        diagnostics::puts(if low_speed { "low" } else { "full" });
-        diagnostics::puts("\n");
-
-        let address = (index + 1) as u8;
-        if enumerate_mouse(base, address, low_speed) {
-            return true;
-        }
-    }
-    false
+    status & STS_HCH == 0
 }
 
 /// Clear write-1-to-clear port bits, preserving the rest.
@@ -385,8 +414,12 @@ unsafe fn td_ptr(index: usize) -> *mut TransferDescriptor {
     core::ptr::addr_of_mut!(CONTROLLER.control_tds[index])
 }
 
-unsafe fn mouse_td_ptr() -> *mut TransferDescriptor {
-    core::ptr::addr_of_mut!(CONTROLLER.mouse_td)
+unsafe fn interrupt_td_ptr(index: usize) -> *mut TransferDescriptor {
+    core::ptr::addr_of_mut!(CONTROLLER.interrupt_tds[index])
+}
+
+unsafe fn report_ptr(index: usize) -> *mut u8 {
+    core::ptr::addr_of_mut!(CONTROLLER.reports[index].0) as *mut u8
 }
 
 unsafe fn init_td(
@@ -405,10 +438,7 @@ unsafe fn init_td(
     } else {
         (length - 1) as u32
     };
-    core::ptr::write_volatile(
-        core::ptr::addr_of_mut!((*td).link),
-        TD_TERMINATE,
-    );
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*td).link), TD_TERMINATE);
     core::ptr::write_volatile(
         core::ptr::addr_of_mut!((*td).status),
         TD_ERROR_COUNTER | TD_ACTIVE | if low_speed { TD_LOW_SPEED } else { 0 },
@@ -420,19 +450,13 @@ unsafe fn init_td(
             | ((toggle as u32) << 19)
             | (encoded_length << 21),
     );
-    core::ptr::write_volatile(
-        core::ptr::addr_of_mut!((*td).buffer),
-        buffer as u32,
-    );
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*td).buffer), buffer as u32);
 }
 
 unsafe fn link_td(previous: usize, next: usize) {
     let next_phys = physical(td_ptr(next) as usize) as u32;
     let td = td_ptr(previous);
-    core::ptr::write_volatile(
-        core::ptr::addr_of_mut!((*td).link),
-        next_phys | TD_DEPTH,
-    );
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*td).link), next_phys | TD_DEPTH);
 }
 
 /// Submit a control transfer on endpoint 0. Data always travels through the
@@ -585,12 +609,28 @@ unsafe fn get_descriptor(
     control_transfer(base, address, low_speed, &setup, true, length, ep0_max)
 }
 
-unsafe fn set_address(
+unsafe fn get_report_descriptor(
     base: u16,
     address: u8,
     low_speed: bool,
+    interface: u8,
+    length: usize,
     ep0_max: usize,
-) -> bool {
+) -> Option<usize> {
+    let setup = [
+        0x81,
+        0x06,
+        0x00,
+        0x22,
+        interface,
+        0x00,
+        (length & 0xFF) as u8,
+        ((length >> 8) & 0xFF) as u8,
+    ];
+    control_transfer(base, address, low_speed, &setup, true, length, ep0_max)
+}
+
+unsafe fn set_address(base: u16, address: u8, low_speed: bool, ep0_max: usize) -> bool {
     let setup = [0x00, 0x05, address, 0x00, 0x00, 0x00, 0x00, 0x00];
     control_transfer(base, 0, low_speed, &setup, false, 0, ep0_max).is_some()
 }
@@ -628,7 +668,259 @@ unsafe fn hid_request(
     control_transfer(base, address, low_speed, &setup, false, 0, ep0_max).is_some()
 }
 
-unsafe fn enumerate_mouse(base: u16, address: u8, low_speed: bool) -> bool {
+/// SET_REPORT(Output) with a one-byte LED bitmap for a boot keyboard.
+unsafe fn set_keyboard_leds(
+    base: u16,
+    address: u8,
+    low_speed: bool,
+    interface: u8,
+    mask: u8,
+    ep0_max: usize,
+) -> bool {
+    *core::ptr::addr_of_mut!(CONTROLLER.data[0]) = mask;
+    let setup = [0x21, 0x09, 0x00, 0x02, interface, 0x00, 0x01, 0x00];
+    control_transfer(base, address, low_speed, &setup, false, 1, ep0_max).is_some()
+}
+
+#[derive(Clone, Copy)]
+struct InterfaceInfo {
+    number: u8,
+    protocol: u8,
+    endpoint: u8,
+    max_packet: usize,
+    interval: u8,
+    hid: bool,
+}
+
+impl InterfaceInfo {
+    const fn new() -> Self {
+        InterfaceInfo {
+            number: 0,
+            protocol: 0,
+            endpoint: 0,
+            max_packet: 0,
+            interval: 0,
+            hid: false,
+        }
+    }
+
+    fn valid(&self) -> bool {
+        self.hid && self.endpoint != 0 && self.max_packet != 0
+    }
+}
+
+fn has_usage(descriptor: &[u8], page: u8, usage: u8) -> bool {
+    let mut index = 0usize;
+    while index + 3 < descriptor.len() {
+        if descriptor[index] == 0x05
+            && descriptor[index + 1] == page
+            && descriptor[index + 2] == 0x09
+            && descriptor[index + 3] == usage
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn allocate_address() -> u8 {
+    unsafe {
+        for _ in 0..127 {
+            let address = NEXT_ADDRESS;
+            NEXT_ADDRESS = if NEXT_ADDRESS >= 127 { 1 } else { NEXT_ADDRESS + 1 };
+            let mut used = false;
+            for index in 0..MAX_DEVICES {
+                if (*device(index)).used && (*device(index)).address == address {
+                    used = true;
+                    break;
+                }
+            }
+            if !used {
+                return address;
+            }
+        }
+    }
+    1
+}
+
+fn has_device_on_port(port: usize) -> bool {
+    unsafe {
+        for index in 0..MAX_DEVICES {
+            let device = &*device(index);
+            if device.used && device.port as usize == port {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn remove_devices_on_port(base: u16, port: usize) {
+    unsafe {
+        let mut removed = false;
+        for index in 0..MAX_DEVICES {
+            let device = &mut *device(index);
+            if device.used && device.base == base && device.port as usize == port {
+                device.used = false;
+                removed = true;
+            }
+        }
+        if removed {
+            diagnostics::puts("[usb] device removed from port ");
+            diagnostics::put_dec(port as u64);
+            diagnostics::puts("\n");
+            rebuild_interrupt_chain(base);
+        }
+    }
+}
+
+unsafe fn rebuild_interrupt_chain(base: u16) {
+    // Stop the controller while the queue-head chain is edited so a frame
+    // cannot walk a half-written link.
+    let command = inw(base + USBCMD);
+    outw(base + USBCMD, command & !CMD_RUN);
+    for _ in 0..100 {
+        if inw(base + USBSTS) & STS_HCH != 0 {
+            break;
+        }
+        wait_ticks(1);
+    }
+
+    let data = controller();
+    for index in 0..MAX_DEVICES {
+        (*data).interrupt_qh[index].element = TD_TERMINATE;
+        (*data).interrupt_qh[index].horizontal = TD_TERMINATE;
+    }
+
+    let mut first = TD_TERMINATE;
+    let mut previous: Option<usize> = None;
+    for index in 0..MAX_DEVICES {
+        if !(*device(index)).used {
+            continue;
+        }
+        let qh_phys =
+            physical(core::ptr::addr_of_mut!((*data).interrupt_qh[index]) as usize) as u32 | 0x2;
+        if let Some(previous) = previous {
+            (*data).interrupt_qh[previous].horizontal = qh_phys;
+        } else {
+            first = qh_phys;
+        }
+        previous = Some(index);
+    }
+    (*data).control_qh.horizontal = first;
+    fence(Ordering::SeqCst);
+
+    outw(base + USBCMD, CMD_RUN);
+    wait_ticks(1);
+}
+
+/// Program the interrupt TD for one device and publish its queue head.
+unsafe fn arm_device(index: usize) {
+    let device = &mut *device(index);
+    let td = interrupt_td_ptr(index);
+    let report_phys = physical(report_ptr(index) as usize);
+    let packet = device.max_packet.clamp(1, 16);
+
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*td).link), TD_TERMINATE);
+    core::ptr::write_volatile(
+        core::ptr::addr_of_mut!((*td).status),
+        TD_ERROR_COUNTER | TD_ACTIVE | if device.low_speed { TD_LOW_SPEED } else { 0 },
+    );
+    core::ptr::write_volatile(
+        core::ptr::addr_of_mut!((*td).token),
+        PID_IN
+            | ((device.address as u32) << 8)
+            | ((device.endpoint as u32) << 15)
+            | ((device.toggle as u32) << 19)
+            | (((packet - 1) as u32) << 21),
+    );
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*td).buffer), report_phys as u32);
+
+    let qh = core::ptr::addr_of_mut!(CONTROLLER.interrupt_qh[index]);
+    core::ptr::write_volatile(
+        core::ptr::addr_of_mut!((*qh).element),
+        physical(td as usize) as u32,
+    );
+    fence(Ordering::SeqCst);
+}
+
+unsafe fn enqueue_device(
+    base: u16,
+    port: usize,
+    address: u8,
+    endpoint: u8,
+    interface: u8,
+    max_packet: usize,
+    interval: u8,
+    low_speed: bool,
+    kind: DeviceKind,
+    report_protocol: bool,
+    layout: zenith_hid::MouseLayout,
+) -> bool {
+    let slot = (0..MAX_DEVICES).find(|index| !(*device(*index)).used);
+    let Some(slot) = slot else {
+        diagnostics::println("[usb] no free device slot");
+        return false;
+    };
+
+    let leds = crate::keyboard::led_mask();
+    let device = &mut *device(slot);
+    device.used = true;
+    device.kind = kind;
+    device.base = base;
+    device.port = port as u8;
+    device.address = address;
+    device.endpoint = endpoint;
+    device.interface = interface;
+    device.max_packet = max_packet.clamp(1, 16);
+    device.interval = interval;
+    device.low_speed = low_speed;
+    device.toggle = false;
+    device.pending_error = false;
+    device.reports = 0;
+    device.report_protocol = report_protocol;
+    device.layout = layout;
+    device.last_leds = leds;
+
+    arm_device(slot);
+    rebuild_interrupt_chain(base);
+
+    match kind {
+        DeviceKind::Mouse => crate::mouse::usb_ready(),
+        DeviceKind::Keyboard => {
+            crate::keyboard::usb_ready();
+            let _ = set_keyboard_leds(
+                base,
+                address,
+                low_speed,
+                interface,
+                leds,
+                8,
+            );
+        }
+    }
+
+    diagnostics::puts("[usb] HID ");
+    diagnostics::puts(match kind {
+        DeviceKind::Mouse => "mouse",
+        DeviceKind::Keyboard => "keyboard",
+    });
+    diagnostics::puts(" ready ep=");
+    diagnostics::put_hex((0x80 | endpoint) as u64);
+    diagnostics::puts(" packet=");
+    diagnostics::put_dec(device.max_packet as u64);
+    diagnostics::puts(" interval=");
+    diagnostics::put_dec(interval as u64);
+    diagnostics::puts(" addr=");
+    diagnostics::put_dec(address as u64);
+    diagnostics::puts(" protocol=");
+    diagnostics::puts(if report_protocol { "report" } else { "boot" });
+    diagnostics::puts("\n");
+    true
+}
+
+unsafe fn enumerate_device(base: u16, port: usize, address: u8, low_speed: bool) -> bool {
     // First read the 8-byte prefix to learn the endpoint-0 packet size.
     let Some(prefix_len) = get_descriptor(base, 0, low_speed, 0x01, 8, 8) else {
         diagnostics::println("[usb] device descriptor failed");
@@ -648,6 +940,7 @@ unsafe fn enumerate_mouse(base: u16, address: u8, low_speed: bool) -> bool {
         diagnostics::println("[usb] short full device descriptor");
         return false;
     }
+    let device_class = CONTROLLER.data[4];
     let vendor = CONTROLLER.data[8] as u16 | ((CONTROLLER.data[9] as u16) << 8);
     let product = CONTROLLER.data[10] as u16 | ((CONTROLLER.data[11] as u16) << 8);
     diagnostics::puts("[usb] device ");
@@ -657,6 +950,11 @@ unsafe fn enumerate_mouse(base: u16, address: u8, low_speed: bool) -> bool {
     diagnostics::puts(" ep0=");
     diagnostics::put_dec(ep0_max as u64);
     diagnostics::puts("\n");
+
+    if device_class == 0x09 {
+        diagnostics::println("[usb] hub ignored (hubs are not supported)");
+        return false;
+    }
 
     if !set_address(base, address, low_speed, ep0_max) {
         diagnostics::println("[usb] SET_ADDRESS failed");
@@ -685,12 +983,9 @@ unsafe fn enumerate_mouse(base: u16, address: u8, low_speed: bool) -> bool {
 
     let config_value = CONTROLLER.data[5];
     let mut offset = 0usize;
-    let mut interface = 0u8;
-    let mut endpoint = 0u8;
-    let mut max_packet = 0usize;
-    let mut interval = 0u8;
-    let mut hid_mouse = false;
-    let mut found_endpoint = false;
+    let mut current = InterfaceInfo::new();
+    let mut interfaces = [InterfaceInfo::new(); MAX_INTERFACES];
+    let mut interface_count = 0usize;
 
     while offset + 2 <= total && offset + 2 <= full_len {
         let length = CONTROLLER.data[offset] as usize;
@@ -700,169 +995,276 @@ unsafe fn enumerate_mouse(base: u16, address: u8, low_speed: bool) -> bool {
         let kind = CONTROLLER.data[offset + 1];
         match kind {
             0x04 if length >= 9 => {
-                interface = CONTROLLER.data[offset + 2];
+                if current.hid && interface_count < MAX_INTERFACES {
+                    interfaces[interface_count] = current;
+                    interface_count += 1;
+                }
+                current = InterfaceInfo::new();
                 let class = CONTROLLER.data[offset + 5];
-                let subclass = CONTROLLER.data[offset + 6];
                 let protocol = CONTROLLER.data[offset + 7];
-                hid_mouse = class == 0x03 && (subclass == 0x01 || protocol == 0x02);
-                diagnostics::puts("[usb] interface class=");
-                diagnostics::put_dec(class as u64);
-                diagnostics::puts("/");
-                diagnostics::put_dec(subclass as u64);
-                diagnostics::puts("/");
-                diagnostics::put_dec(protocol as u64);
-                diagnostics::puts(if hid_mouse { " (HID mouse)\n" } else { "\n" });
+                current.number = CONTROLLER.data[offset + 2];
+                current.protocol = protocol;
+                current.hid = class == 0x03;
             }
-            0x05 if length >= 7 && hid_mouse => {
+            0x05 if length >= 7 && current.hid => {
                 let address = CONTROLLER.data[offset + 2];
                 let attributes = CONTROLLER.data[offset + 3];
                 let packet = (CONTROLLER.data[offset + 4] as usize)
                     | ((CONTROLLER.data[offset + 5] as usize) << 8);
                 if address & 0x80 != 0 && attributes & 0x03 == 0x03 {
-                    endpoint = address & 0x0F;
-                    max_packet = (packet & 0x7FF).clamp(1, 16);
-                    interval = CONTROLLER.data[offset + 6];
-                    found_endpoint = true;
+                    current.endpoint = address & 0x0F;
+                    current.max_packet = (packet & 0x7FF).clamp(1, 16);
+                    current.interval = CONTROLLER.data[offset + 6];
                 }
             }
             _ => {}
         }
         offset += length;
     }
+    if current.hid && interface_count < MAX_INTERFACES {
+        interfaces[interface_count] = current;
+        interface_count += 1;
+    }
 
-    if !hid_mouse || !found_endpoint || endpoint == 0 || max_packet == 0 {
-        diagnostics::println("[usb] no HID mouse interface found");
+    if interface_count == 0 {
+        diagnostics::println("[usb] no HID interface found");
         return false;
     }
+
+    let mut chosen: Option<(InterfaceInfo, DeviceKind, bool, zenith_hid::MouseLayout)> = None;
+    for candidate in interfaces.iter().take(interface_count) {
+        if !candidate.valid() {
+            continue;
+        }
+        let mut kind = match candidate.protocol {
+            1 => Some(DeviceKind::Keyboard),
+            2 => Some(DeviceKind::Mouse),
+            _ => None,
+        };
+        let mut report_protocol = candidate.protocol == 2;
+        let mut layout = UsbDevice::new().layout;
+
+        if kind.is_none() || kind == Some(DeviceKind::Mouse) {
+            if let Some(length) =
+                get_report_descriptor(base, address, low_speed, candidate.number, 256, ep0_max)
+            {
+                let descriptor = &CONTROLLER.data[..length.min(MAX_DATA)];
+                if let Some(parsed) = zenith_hid::parse_mouse(descriptor) {
+                    kind = Some(DeviceKind::Mouse);
+                    report_protocol = true;
+                    layout = parsed;
+                } else if kind.is_none() && has_usage(descriptor, 0x01, 0x06) {
+                    kind = Some(DeviceKind::Keyboard);
+                }
+            }
+        }
+
+        let Some(kind) = kind else {
+            continue;
+        };
+        // Prefer an explicit mouse, then a keyboard, then anything usable.
+        let better = match chosen {
+            None => true,
+            Some((_, existing, _, _)) => {
+                (existing != DeviceKind::Mouse && kind == DeviceKind::Mouse)
+                    || (existing == DeviceKind::Keyboard && kind == DeviceKind::Keyboard && candidate.protocol == 1)
+            }
+        };
+        if better {
+            chosen = Some((*candidate, kind, report_protocol, layout));
+        }
+    }
+
+    let Some((candidate, kind, report_protocol, layout)) = chosen else {
+        diagnostics::println("[usb] no supported HID keyboard or mouse found");
+        return false;
+    };
 
     if !set_configuration(base, address, low_speed, config_value, ep0_max) {
         diagnostics::println("[usb] SET_CONFIGURATION failed");
         return false;
     }
 
-    // Boot protocol makes the report layout predictable (3-4 bytes).
-    let _ = hid_request(base, address, low_speed, interface, 0x0A, 0, ep0_max);
-    if !hid_request(base, address, low_speed, interface, 0x0B, 0, ep0_max) {
-        diagnostics::println("[usb] SET_PROTOCOL(boot) failed");
+    let _ = hid_request(base, address, low_speed, candidate.number, 0x0A, 0, ep0_max); // SET_IDLE(0)
+    let protocol = if kind == DeviceKind::Mouse && report_protocol {
+        0
+    } else {
+        1
+    };
+    if !hid_request(base, address, low_speed, candidate.number, 0x0B, protocol, ep0_max) {
+        diagnostics::println("[usb] SET_PROTOCOL failed");
     }
 
-    let report_phys = physical(core::ptr::addr_of_mut!(CONTROLLER.report.0) as usize);
-    let mouse_td = mouse_td_ptr();
-    core::ptr::write_volatile(
-        core::ptr::addr_of_mut!((*mouse_td).link),
-        TD_TERMINATE,
-    );
-    core::ptr::write_volatile(
-        core::ptr::addr_of_mut!((*mouse_td).status),
-        TD_ERROR_COUNTER | TD_ACTIVE | if low_speed { TD_LOW_SPEED } else { 0 },
-    );
-    core::ptr::write_volatile(
-        core::ptr::addr_of_mut!((*mouse_td).token),
-        PID_IN
-            | ((address as u32) << 8)
-            | ((endpoint as u32) << 15)
-            | (((max_packet - 1) as u32) << 21),
-    );
-    core::ptr::write_volatile(
-        core::ptr::addr_of_mut!((*mouse_td).buffer),
-        report_phys as u32,
-    );
-
-    let mouse = core::ptr::addr_of_mut!(USB_MOUSE);
-    (*mouse).ready = true;
-    (*mouse).base = base;
-    (*mouse).address = address;
-    (*mouse).endpoint = endpoint;
-    (*mouse).max_packet = max_packet;
-    (*mouse).toggle = false;
-    (*mouse).low_speed = low_speed;
-    (*mouse).pending_error = false;
-    (*mouse).reports = 0;
-
-    let interrupt_qh = core::ptr::addr_of_mut!(CONTROLLER.interrupt_qh);
-    core::ptr::write_volatile(
-        core::ptr::addr_of_mut!((*interrupt_qh).element),
-        physical(mouse_td as usize) as u32,
-    );
-    fence(Ordering::SeqCst);
-
-    crate::mouse::usb_ready();
-    diagnostics::puts("[usb] HID mouse ready ep=");
-    diagnostics::put_hex((0x80 | endpoint) as u64);
-    diagnostics::puts(" packet=");
-    diagnostics::put_dec(max_packet as u64);
-    diagnostics::puts(" interval=");
-    diagnostics::put_dec(interval as u64);
-    diagnostics::puts(" addr=");
-    diagnostics::put_dec(address as u64);
-    diagnostics::puts("\n");
-    true
+    enqueue_device(
+        base,
+        port,
+        address,
+        candidate.endpoint,
+        candidate.number,
+        candidate.max_packet,
+        candidate.interval,
+        low_speed,
+        kind,
+        report_protocol,
+        layout,
+    )
 }
 
-/// Poll the interrupt IN endpoint. Called from the shell loop.
+unsafe fn service_port(base: u16, port_index: usize, port: u16, force: bool) {
+    let status = inw(base + port);
+    let changed = status & (PORT_CSC | PORT_PEDC) != 0;
+    if !changed && !force {
+        return;
+    }
+    if changed {
+        port_clear_change(base, port);
+    }
+
+    let status = inw(base + port);
+    if status & PORT_CCS == 0 {
+        remove_devices_on_port(base, port_index);
+        return;
+    }
+    if has_device_on_port(port_index) {
+        return;
+    }
+
+    let Some(status) = reset_port(base, port) else {
+        diagnostics::puts("[usb] port ");
+        diagnostics::put_dec(port_index as u64);
+        diagnostics::puts(" did not enumerate\n");
+        return;
+    };
+    let low_speed = status & PORT_LSDA != 0;
+    diagnostics::puts("[usb] port ");
+    diagnostics::put_dec(port_index as u64);
+    diagnostics::puts(" enabled status=");
+    diagnostics::put_hex(status as u64);
+    diagnostics::puts(" speed=");
+    diagnostics::puts(if low_speed { "low" } else { "full" });
+    diagnostics::puts("\n");
+
+    let address = allocate_address();
+    let _ = enumerate_device(base, port_index, address, low_speed);
+    // The reset above raises connect-change again; clear it so an unsupported
+    // device (for example a hub) is not reset on every poll.
+    port_clear_change(base, port);
+}
+
+/// Poll interrupt endpoints and service hotplug. Called from the shell loop.
 pub fn poll() {
+    let base = unsafe { CONTROLLER_BASE };
+    if base == 0 {
+        return;
+    }
+
+    for index in 0..MAX_DEVICES {
+        poll_device(index);
+    }
+
+    for (port_index, port) in PORTS.iter().enumerate() {
+        let status = unsafe { inw(base + *port) };
+        if status & (PORT_CSC | PORT_PEDC) != 0 {
+            unsafe { service_port(base, port_index, *port, false) };
+        }
+    }
+}
+
+fn poll_device(index: usize) {
     unsafe {
-        let mouse = core::ptr::addr_of_mut!(USB_MOUSE);
-        if !(*mouse).ready {
+        let device = &mut *device(index);
+        if !device.used {
             return;
         }
-        let td = mouse_td_ptr();
+        let td = interrupt_td_ptr(index);
         let status = core::ptr::read_volatile(core::ptr::addr_of!((*td).status));
         if status & TD_ACTIVE != 0 {
             return;
         }
 
-        if status & TD_ERROR != 0 {
-            if !(*mouse).pending_error {
-                (*mouse).pending_error = true;
-                diagnostics::puts("[usb] mouse transfer error status=");
+        let nak = status & TD_NAK != 0;
+        let error = status & TD_ERROR != 0;
+        if error || nak {
+            if error && !device.pending_error {
+                device.pending_error = true;
+                diagnostics::puts("[usb] transfer error status=");
                 diagnostics::put_hex(status as u64);
                 diagnostics::puts("\n");
             }
-            rearm();
+            // A NAK is normal for an idle interrupt endpoint and must not
+            // advance the data toggle.
+            rearm(index, !nak);
             return;
         }
 
-        let length = (status & TD_ACTUAL_LEN) as usize;
-        if length >= 3 {
-            let report = &*core::ptr::addr_of!(CONTROLLER.report.0);
-            crate::mouse::usb_report(report, length.min(16));
-            (*mouse).reports += 1;
+        device.pending_error = false;
+        let length = (status & TD_ACTUAL_LEN) as usize + 1;
+        let report_len = length.min(device.max_packet).min(16);
+        if report_len > 0 {
+            let report = &*core::ptr::addr_of!(CONTROLLER.reports[index].0);
+            match device.kind {
+                DeviceKind::Keyboard => {
+                    crate::keyboard::usb_report(report, report_len);
+                }
+                DeviceKind::Mouse if device.report_protocol => {
+                    if let Some(decoded) = zenith_hid::decode_mouse(&device.layout, report) {
+                        crate::mouse::usb_input(
+                            decoded.buttons,
+                            decoded.dx,
+                            decoded.dy,
+                            decoded.wheel,
+                        );
+                    }
+                }
+                DeviceKind::Mouse => crate::mouse::usb_report(report, report_len),
+            }
+            device.reports += 1;
         }
-        rearm();
+
+        if device.kind == DeviceKind::Keyboard {
+            let leds = crate::keyboard::led_mask();
+            if leds != device.last_leds {
+                let base = device.base;
+                let address = device.address;
+                let low_speed = device.low_speed;
+                let interface = device.interface;
+                if set_keyboard_leds(base, address, low_speed, interface, leds, 8) {
+                    device.last_leds = leds;
+                }
+            }
+        }
+
+        rearm(index, true);
     }
 }
 
-unsafe fn rearm() {
-    let mouse = core::ptr::addr_of_mut!(USB_MOUSE);
-    if !(*mouse).ready {
+unsafe fn rearm(index: usize, advance_toggle: bool) {
+    let device = &mut *device(index);
+    if !device.used {
         return;
     }
-    (*mouse).toggle = !(*mouse).toggle;
-    (*mouse).pending_error = false;
-    let td = mouse_td_ptr();
-    let report_phys = physical(core::ptr::addr_of_mut!(CONTROLLER.report.0) as usize);
+    if advance_toggle {
+        device.toggle = !device.toggle;
+    }
+    let td = interrupt_td_ptr(index);
+    let report_phys = physical(report_ptr(index) as usize);
+    let packet = device.max_packet.clamp(1, 16);
     core::ptr::write_volatile(
         core::ptr::addr_of_mut!((*td).status),
-        TD_ERROR_COUNTER
-            | TD_ACTIVE
-            | if (*mouse).low_speed { TD_LOW_SPEED } else { 0 },
+        TD_ERROR_COUNTER | TD_ACTIVE | if device.low_speed { TD_LOW_SPEED } else { 0 },
     );
     core::ptr::write_volatile(
         core::ptr::addr_of_mut!((*td).token),
         PID_IN
-            | (((*mouse).address as u32) << 8)
-            | (((*mouse).endpoint as u32) << 15)
-            | (((*mouse).toggle as u32) << 19)
-            | ((((*mouse).max_packet - 1) as u32) << 21),
+            | ((device.address as u32) << 8)
+            | ((device.endpoint as u32) << 15)
+            | ((device.toggle as u32) << 19)
+            | (((packet - 1) as u32) << 21),
     );
+    core::ptr::write_volatile(core::ptr::addr_of_mut!((*td).buffer), report_phys as u32);
+    let qh = core::ptr::addr_of_mut!(CONTROLLER.interrupt_qh[index]);
     core::ptr::write_volatile(
-        core::ptr::addr_of_mut!((*td).buffer),
-        report_phys as u32,
-    );
-    let interrupt_qh = core::ptr::addr_of_mut!(CONTROLLER.interrupt_qh);
-    core::ptr::write_volatile(
-        core::ptr::addr_of_mut!((*interrupt_qh).element),
+        core::ptr::addr_of_mut!((*qh).element),
         physical(td as usize) as u32,
     );
     fence(Ordering::SeqCst);
@@ -870,5 +1272,26 @@ unsafe fn rearm() {
 
 /// Whether a USB HID mouse has been enumerated and is being polled.
 pub fn present() -> bool {
-    unsafe { (*core::ptr::addr_of!(USB_MOUSE)).ready }
+    unsafe {
+        for index in 0..MAX_DEVICES {
+            let device = &*device(index);
+            if device.used && device.kind == DeviceKind::Mouse {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether a USB HID keyboard has been enumerated and is being polled.
+pub fn keyboard_present() -> bool {
+    unsafe {
+        for index in 0..MAX_DEVICES {
+            let device = &*device(index);
+            if device.used && device.kind == DeviceKind::Keyboard {
+                return true;
+            }
+        }
+    }
+    false
 }

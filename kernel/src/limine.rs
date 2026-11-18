@@ -10,6 +10,7 @@ extern "C" {
     static limine_memmap_request: [u64; 6];
     static limine_hhdm_request: [u64; 6];
     static limine_kernel_address_request: [u64; 6];
+    static limine_executable_cmdline_request: [u64; 6];
     static limine_cs: u16;
 }
 
@@ -59,6 +60,12 @@ pub struct LimineKernelAddressResponse {
     pub revision: u64,
     pub physical_base: u64,
     pub virtual_base: u64,
+}
+
+#[repr(C)]
+pub struct LimineCmdlineResponse {
+    pub revision: u64,
+    pub cmdline: u64,
 }
 
 #[repr(C)]
@@ -151,6 +158,65 @@ pub fn report_memory_map() {
 /// Code selector Limine entered with (used for our IDT gates).
 pub fn code_selector() -> u16 {
     unsafe { limine_cs }
+}
+
+/// The command line Limine passed for the loaded executable.
+pub fn cmdline() -> &'static str {
+    let Some(response) = (unsafe {
+        response::<LimineCmdlineResponse>(&limine_executable_cmdline_request)
+    }) else {
+        return "";
+    };
+    if response.cmdline == 0 {
+        return "";
+    }
+    let pointer = response.cmdline as *const u8;
+    let mut length = 0usize;
+    while length < 512 {
+        if unsafe { read_unaligned(pointer.add(length)) } == 0 {
+            break;
+        }
+        length += 1;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(pointer, length) };
+    core::str::from_utf8(bytes).unwrap_or("")
+}
+
+/// How the kernel should present itself, selected by the Limine entry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BootMode {
+    /// Full graphical desktop.
+    Normal,
+    /// Graphical desktop at a conservative resolution with reduced effects.
+    Safe,
+    /// Text recovery console rendered into the framebuffer.
+    Recovery,
+}
+
+/// Parse the boot mode from the executable command line.
+///
+/// Recognised tokens are `safe`, `recovery`, and `text`; the recovery console
+/// wins over safe graphics so a broken display path always has an escape.
+pub fn boot_mode() -> BootMode {
+    let mut mode = BootMode::Normal;
+    for token in cmdline().split_ascii_whitespace() {
+        if token.eq_ignore_ascii_case("recovery") || token.eq_ignore_ascii_case("text") {
+            return BootMode::Recovery;
+        }
+        if token.eq_ignore_ascii_case("safe") {
+            mode = BootMode::Safe;
+        }
+    }
+    mode
+}
+
+/// Human-readable boot mode for logs and the About window.
+pub fn mode_name(mode: BootMode) -> &'static str {
+    match mode {
+        BootMode::Normal => "normal",
+        BootMode::Safe => "safe graphics",
+        BootMode::Recovery => "recovery console",
+    }
 }
 
 /// Higher-half direct map offset reported by Limine.
