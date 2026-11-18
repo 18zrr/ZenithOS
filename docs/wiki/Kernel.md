@@ -14,7 +14,7 @@ assembly entry points.
 | `interrupt.rs` | IDT, PIC, page-fault and exception reporting |
 | `timer.rs` | PIT at 100 Hz |
 | `keyboard.rs` | PS/2 scancodes, input buffer, raw scancode channel |
-| `mouse.rs` | PS/2 mouse on IRQ12, packet decoding, 128-event queue |
+| `mouse.rs` | Shared PS/2/USB mouse state, packet decoding, 128-event queue |
 | `rtc.rs` | CMOS real-time clock |
 | `start_menu.rs` | Start menu state, search filter and selection |
 | `wm.rs` | Compositor, window manager, taskbar and desktop input |
@@ -25,7 +25,7 @@ assembly entry points.
 | `acpi.rs` | RSDP discovery |
 | `e1000.rs` | NIC detection, MAC/link, descriptor rings, TX |
 | `net.rs` | DHCP, UDP, TCP frame construction and RX dispatch |
-| `usb.rs` | UHCI controller/port support |
+| `usb.rs` | UHCI host controller, control transfers, HID boot-mouse polling |
 | `nvidia.rs` | GPU detection and MMIO probing |
 | `fs.rs` | Mounts Zenith FS, FAT32, NTFS, ext4 test partitions |
 | `framebuffer.rs` / `font.rs` / `vga.rs` | Graphics and consoles |
@@ -35,7 +35,7 @@ assembly entry points.
 ## Console
 
 `diagnostics::puts` writes to COM1 serial and to the on-screen console. The
-framebuffer console uses a scaled 8×8 font and clears each cell before drawing.
+framebuffer console uses antialiased 10×20 glyphs blended into the compositor.
 After boot, `boot_complete()` switches the screen to the compositor in `wm.rs`;
 the shell text is drawn inside the Terminal window rather than directly to the
 framebuffer.
@@ -57,7 +57,8 @@ dispatcher for read/write/open/close. No user process uses it yet.
 - Scheduling is cooperative; no APIC preemption.
 - General demand paging is not implemented (one test page is).
 - e1000 RX is written but has never received a packet in QEMU.
-- USB control transfers do not complete, so no device enumeration or HID input.
+- USB support is UHCI only: EHCI/xHCI are not initialised, there is no hotplug or
+  USB keyboard support, and only one HID boot-protocol mouse is handled.
 - The compositor is software-only at a fixed 1024×768.
 
 See [Scheduling](Scheduling.md), [Interrupts](Interrupts.md), and

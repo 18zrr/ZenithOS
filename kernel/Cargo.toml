@@ -8,6 +8,7 @@ autobins = false
 
 [dependencies]
 zenith-fs = { path = "../filesystem/zenith-fs" }
+zenith-hid = { path = "../drivers/hid" }
 
 [lib]
 crate-type = ["staticlib"]

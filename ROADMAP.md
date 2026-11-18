@@ -41,7 +41,8 @@ are built and tested.
 - [x] PS/2 mouse driver (IRQ12) with queued events
 - [x] ATA PIO storage read/write
 - [x] PCI, ACPI, e1000 TX, UHCI detection, NVIDIA probing
-- [ ] USB device enumeration and a HID class driver (USB mice do not work)
+- [x] UHCI control transfers and a HID boot-protocol mouse
+- [ ] USB keyboard, hotplug, EHCI/xHCI initialisation
 - [ ] Validate e1000 RX with live traffic
 
 ## Phase 4: User Interface (Partially completed)
@@ -76,13 +77,14 @@ are built and tested.
 ## Current Status
 - BIOS disk image, UEFI disk image (+OVMF at 512 MiB) and ISO reach the
   graphical desktop; direct PVH load reaches the text shell.
-- Kernel includes paging, interrupts, PS/2 keyboard and mouse, a CMOS clock,
-  a cooperative scheduler, Zenith FS and read-only FAT32/NTFS/ext4 drivers.
+- Kernel includes paging, interrupts, PS/2 keyboard and PS/2/USB HID mouse, a
+  CMOS clock, a cooperative scheduler, Zenith FS and read-only FAT32/NTFS/ext4
+  drivers.
 - Workspace builds cleanly; 26 tests across 40 suites pass.
 
 ## Next Steps
 1. Generalise paging and add APIC-based preemption.
-2. Complete USB enumeration and a HID class driver.
+2. Add USB keyboard support, hotplug detection and EHCI/xHCI initialisation.
 3. Add a VFS mount table and syscall-driven userland processes.
 4. Richer window management and HiDPI/multi-monitor support.
 5. Validate e1000 RX with live traffic.

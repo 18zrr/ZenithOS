@@ -34,7 +34,8 @@ keyboard IRQ stores translated characters in a buffer and raw scancodes in a
 separate 16-entry ring used by the F12 orientation toggle.
 
 The mouse IRQ assembles three-byte PS/2 packets and pushes movement and button
-events into a 128-entry queue. The shell loop drains that queue and feeds the
-window manager, so the interrupt handler never draws.
+events into a 128-entry queue. USB HID reports are polled from the shell loop
+and appended to the same queue. The shell loop drains the queue and feeds the
+window manager, so neither the interrupt handler nor USB polling draws.
 
 See [Scheduling](Scheduling.md) and [Graphics](Graphics.md).

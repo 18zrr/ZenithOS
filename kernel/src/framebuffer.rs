@@ -4,7 +4,7 @@ use core::ptr::read_unaligned;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::diagnostics;
-use crate::font::FONT;
+use crate::font::{blend, COL_PITCH, FONT, GLYPH_HEIGHT, GLYPH_WIDTH, ROW_PITCH};
 use crate::sync::SpinLock;
 
 extern "C" {
@@ -249,8 +249,6 @@ static TEXT: SpinLock<TextCursor> = SpinLock::new(TextCursor {
 
 // Logical console layout. The window manager decides where the terminal window
 // sits; this module only tracks the text grid and how many cells fit.
-const COL_PITCH: usize = 16;
-const ROW_PITCH: usize = 20;
 const ACCENT: u32 = 0x000078D4;
 const SHADOW_COLS: usize = 100;
 const SHADOW_ROWS: usize = 40;
@@ -291,24 +289,22 @@ fn draw_glyph_to(
     color: u32,
 ) {
     let glyph = &FONT[(byte as usize) & 0x7F];
-    for row in 0..8 {
-        let py = y + row * 2;
-        if py + 1 >= height {
+    for row in 0..GLYPH_HEIGHT {
+        let py = y + row;
+        if py >= height {
             break;
         }
-        for column in 0..8 {
-            if glyph[row] & (1 << (7 - column)) == 0 {
+        for column in 0..GLYPH_WIDTH {
+            let alpha = glyph[row][column];
+            if alpha == 0 {
                 continue;
             }
-            let px = x + column * 2;
-            if px + 1 >= stride {
+            let px = x + column;
+            if px >= stride {
                 continue;
             }
             let offset = py * stride + px;
-            frame[offset] = color;
-            frame[offset + 1] = color;
-            frame[offset + stride] = color;
-            frame[offset + stride + 1] = color;
+            frame[offset] = blend(frame[offset], color, alpha);
         }
     }
 }
@@ -437,6 +433,20 @@ fn put_pixel(fb: &Framebuffer, x: usize, y: usize, color: u32) {
     }
 }
 
+#[inline]
+fn blend_pixel(fb: &Framebuffer, x: usize, y: usize, color: u32, alpha: u8) {
+    if alpha == 0 || x >= fb.width || y >= fb.height {
+        return;
+    }
+    let (x, y) = mapped(fb, x, y);
+    let offset = y * fb.pitch + x * fb.bytes_per_pixel;
+    let destination = (fb.address + offset) as *mut u32;
+    unsafe {
+        let dst = core::ptr::read_volatile(destination);
+        core::ptr::write_volatile(destination, blend(dst, color, alpha));
+    }
+}
+
 /// Draw a filled rectangle.
 pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: u32) {
     if let Some(fb) = FRAMEBUFFER.lock().as_ref() {
@@ -462,20 +472,17 @@ pub fn text(x: usize, y: usize, message: &str, color: u32) {
 fn draw_text(fb: &Framebuffer, x: usize, y: usize, text: &str, color: u32) {
     for (index, byte) in text.bytes().enumerate() {
         let glyph = &FONT[(byte as usize) & 0x7F];
-        for row in 0..8 {
-            for column in 0..8 {
-                if glyph[row] & (1 << (7 - column)) == 0 {
-                    continue;
-                }
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        put_pixel(
-                            fb,
-                            x + index * COL_PITCH + column * 2 + dx,
-                            y + row * 2 + dy,
-                            color,
-                        );
-                    }
+        for row in 0..GLYPH_HEIGHT {
+            for column in 0..GLYPH_WIDTH {
+                let alpha = glyph[row][column];
+                if alpha != 0 {
+                    blend_pixel(
+                        fb,
+                        x + index * COL_PITCH + column,
+                        y + row,
+                        color,
+                        alpha,
+                    );
                 }
             }
         }

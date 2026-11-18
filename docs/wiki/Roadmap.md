@@ -7,8 +7,9 @@ see [Status](Status.md) for the verified baseline.
 
 1. **e1000 RX and networking** — complete and validate the receive path;
    verify live DHCP/UDP/TCP exchange, not just TX.
-2. **USB enumeration** — make UHCI control transfers complete, add a HID class
-   driver, and support EHCI/xHCI beyond class detection.
+2. **USB expansion** — add USB keyboard support and hotplug detection, and
+   initialise EHCI/xHCI beyond class detection, on top of the working UHCI HID
+   mouse path.
 3. **APIC preemption** — add an APIC timer and preemptive scheduling; the
    current scheduler is cooperative ([Scheduling](Scheduling.md)).
 4. **Generalise paging** — a page allocator and recovery for arbitrary faults

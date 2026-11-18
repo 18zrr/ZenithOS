@@ -40,6 +40,10 @@ All four paths reach the interactive shell. The BIOS, UEFI and ISO paths also
 bring up the graphical desktop; QEMU's direct PVH/multiboot load provides no
 linear framebuffer, so it stays text-only.
 
+QEMU's default PS/2 mouse works out of the box. Add `-usb -device usb-mouse` to
+any QEMU command to attach a USB HID mouse as well; the serial log then reports
+`[usb] HID mouse ready ep=0x81 packet=4 interval=10 addr=1`.
+
 UEFI was verified with 512 MiB of guest RAM. With 128 MiB the Limine loader
 reports `High memory allocator: Out of memory` before the kernel starts:
 
@@ -90,7 +94,7 @@ The terminal only receives typing while its window is focused.
 
 | Action | Input |
 |---|---|
-| Move the pointer | PS/2 mouse (USB mice are not supported) |
+| Move the pointer | PS/2 mouse, or USB HID mouse with `-usb -device usb-mouse` |
 | Focus / raise a window | Click it |
 | Move a window | Drag its title bar |
 | Resize a window | Drag the bottom-right grip |

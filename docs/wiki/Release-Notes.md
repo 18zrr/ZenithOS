@@ -1,14 +1,22 @@
 # Release Notes — Unreleased desktop update
 
-**2026-11-17 · x86_64 · Limine bootloader**
+**2026-11-18 · x86_64 · Limine bootloader**
 
-This update adds real mouse input and a compositing window manager on top of
-the v0.1.0 baseline. It is not a tagged release; the v0.1.0 notes remain below.
+This update adds real PS/2 and USB HID mouse input and a compositing window
+manager on top of the v0.1.0 baseline. It is not a tagged release; the v0.1.0
+notes remain below.
 
 ## Highlights
 
-- **PS/2 mouse**: IRQ12 driver with three-byte packet assembly, left/right/middle
-  buttons, screen clamping and a 128-event queue. USB mice are not supported.
+- **Mouse input**: PS/2 on IRQ12 plus a USB HID boot-protocol mouse on UHCI.
+  Both feed a shared event queue with left/right/middle buttons, screen clamping
+  and 128 queued events. The USB driver resets the controller and port,
+  enumerates the device through endpoint-0 control transfers, selects the HID
+  boot protocol, and polls its interrupt IN endpoint from the shell loop. There
+  is no USB interrupt handler.
+- **Text rendering**: replaced the 2×-scaled 8×8 VGA glyphs with antialiased
+  10×20 DejaVu Sans Mono glyphs. Coverage is alpha-blended into the composited
+  frame, so text stays crisp over the wallpaper, windows and menus.
 - **Compositing desktop**: a cached gradient wallpaper and a full-screen RAM
   frame are composed into one buffer (about 6 MiB at 1024×768) and blitted to
   the framebuffer, avoiding per-pixel flicker. Redraws are capped at roughly
@@ -41,12 +49,22 @@ the v0.1.0 baseline. It is not a tagged release; the v0.1.0 notes remain below.
   clicks, tile selection, title-bar dragging, corner resizing, minimise,
   taskbar restore, maximise/restore, close, accent switching, keyboard search,
   Enter-to-launch and installer Escape/restore.
+- USB HID input was verified with `-usb -device usb-mouse` on the BIOS image,
+  the ISO and the UEFI image + OVMF. The serial log reports
+  `[usb] HID mouse ready ep=0x81 packet=4 interval=10 addr=1`, and injected
+  movement, clicks, dragging, resizing and closing all reach the window manager.
+- A boot without a USB controller logs `[usb] controllers found: 0x0` and still
+  drives the cursor through PS/2 input.
+- The new text renderer was boot-verified on the BIOS, UEFI and ISO paths;
+  desktop, Start menu, System Monitor, Settings, About and the installer were
+  checked for clipping and alignment.
 - QEMU PVH direct load still boots to the text shell. It is text-only because
   that path provides no linear framebuffer.
 
 ## Known limitations
 
-- Mouse support is PS/2 only; USB HID enumeration is incomplete.
+- USB support is UHCI only. EHCI/xHCI are not initialised, there is no hotplug
+  or USB keyboard support, and only one HID boot-protocol mouse is handled.
 - The graphical desktop requires a Limine framebuffer. The direct PVH path is
   text-only.
 - Compositing is software-only at 1024×768 with no GPU acceleration, HiDPI

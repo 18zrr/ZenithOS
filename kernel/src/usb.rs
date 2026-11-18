@@ -787,7 +787,7 @@ unsafe fn enumerate_mouse(base: u16, address: u8, low_speed: bool) -> bool {
     fence(Ordering::SeqCst);
 
     crate::mouse::usb_ready();
-    diagnostics::puts("[usb] HID mouse ready ep=0x");
+    diagnostics::puts("[usb] HID mouse ready ep=");
     diagnostics::put_hex((0x80 | endpoint) as u64);
     diagnostics::puts(" packet=");
     diagnostics::put_dec(max_packet as u64);

@@ -47,8 +47,9 @@ Boot paths: PVH direct load (text), Limine BIOS image, Limine UEFI image, bootab
 ## Rules of thumb
 
 - Describe only implemented, verified behaviour in documentation.
-- Do not claim unfinished features work (RX, USB enumeration, APIC preemption,
-  general paging, VFS mount table, syscall-driven userland, native GPU driver).
+- Do not claim unfinished features work (e1000 RX, USB keyboard/hotplug/EHCI,
+  APIC preemption, general paging, VFS mount table, syscall-driven userland,
+  native GPU driver).
 - Ask before major architectural changes; do not remove existing functionality
   without approval.
 

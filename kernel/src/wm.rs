@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::font::FONT;
+use crate::font::{blend, COL_PITCH, FONT, GLYPH_HEIGHT, GLYPH_WIDTH, ROW_PITCH};
 use crate::framebuffer as fb;
 use crate::{diagnostics, e1000, limine, mouse, rtc, start_menu, timer};
 
@@ -22,8 +22,6 @@ const MAX_WINDOWS: usize = 8;
 const TITLEBAR_H: usize = 36;
 const TASKBAR_H: usize = 48;
 const PAD: usize = 14;
-const COL_PITCH: usize = 16;
-const ROW_PITCH: usize = 20;
 
 const WALL_TOP: u32 = 0x000A_1728;
 const WALL_BOTTOM: u32 = 0x001A_3A5E;
@@ -282,23 +280,22 @@ fn draw_glyph(
     color: u32,
 ) {
     let glyph = &FONT[(byte as usize) & 0x7F];
-    for row in 0..8 {
-        for column in 0..8 {
-            if glyph[row] & (1 << (7 - column)) == 0 {
+    for row in 0..GLYPH_HEIGHT {
+        let py = y + row as i32;
+        if py < 0 || py as usize >= height {
+            continue;
+        }
+        for column in 0..GLYPH_WIDTH {
+            let alpha = glyph[row][column];
+            if alpha == 0 {
                 continue;
             }
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    put(
-                        frame,
-                        stride,
-                        height,
-                        x + (column * 2 + dx) as i32,
-                        y + (row * 2 + dy) as i32,
-                        color,
-                    );
-                }
+            let px = x + column as i32;
+            if px < 0 || px as usize >= stride {
+                continue;
             }
+            let offset = py as usize * stride + px as usize;
+            frame[offset] = blend(frame[offset], color, alpha);
         }
     }
 }
@@ -1182,14 +1179,14 @@ impl Wm {
 
         // App icon and title.
         let icon_x = x + 12;
-        let icon_y = y + (TITLEBAR_H as i32 - 18) / 2;
-        rounded_rect(frame, stride, height, icon_x, icon_y, 18, 18, 5, window.kind.color());
+        let icon_y = y + (TITLEBAR_H as i32 - 20) / 2;
+        rounded_rect(frame, stride, height, icon_x, icon_y, 20, 20, 5, window.kind.color());
         draw_glyph(
             frame,
             stride,
             height,
-            icon_x + 1,
-            icon_y + 1,
+            icon_x + (20 - GLYPH_WIDTH as i32) / 2,
+            icon_y + (20 - GLYPH_HEIGHT as i32) / 2,
             window.kind.letter(),
             0x00FF_FFFF,
         );
@@ -1199,7 +1196,7 @@ impl Wm {
             stride,
             height,
             x + 38,
-            y + (TITLEBAR_H as i32 - 16) / 2,
+            y + (TITLEBAR_H as i32 - GLYPH_HEIGHT as i32) / 2,
             x + w as i32 - 160,
             window.kind.title(),
             title_color,
@@ -1329,8 +1326,17 @@ impl Wm {
             if column < columns && row < rows {
                 let caret_x = left + (column * COL_PITCH) as i32;
                 let caret_y = top + (row * ROW_PITCH) as i32;
-                if caret_x + 2 <= right && caret_y + 16 <= bottom {
-                    fill(frame, stride, height, caret_x, caret_y, 2, 16, self.accent);
+                if caret_x + 2 <= right && caret_y + GLYPH_HEIGHT as i32 <= bottom {
+                    fill(
+                        frame,
+                        stride,
+                        height,
+                        caret_x,
+                        caret_y,
+                        2,
+                        GLYPH_HEIGHT,
+                        self.accent,
+                    );
                 }
             }
         }
@@ -1649,8 +1655,8 @@ impl Wm {
                 frame,
                 stride,
                 height,
-                rect.x + 16,
-                rect.y + 15,
+                rect.x + 9 + (30 - GLYPH_WIDTH as i32) / 2,
+                rect.y + 8 + (30 - GLYPH_HEIGHT as i32) / 2,
                 kind.letter(),
                 0x00FF_FFFF,
             );
@@ -1698,7 +1704,7 @@ impl Wm {
             frame,
             stride,
             height,
-            self.width as i32 - 112,
+            self.width as i32 - 24 - 5 * COL_PITCH as i32,
             ty + 16,
             self.width as i32 - 12,
             clock.as_str(),
@@ -1935,8 +1941,8 @@ impl Wm {
                 frame,
                 stride,
                 height,
-                rect.x + 21,
-                rect.y + 24,
+                rect.x + 14 + (30 - GLYPH_WIDTH as i32) / 2,
+                rect.y + 17 + (30 - GLYPH_HEIGHT as i32) / 2,
                 start_menu::APPS[app].0.as_bytes()[0],
                 0x00FF_FFFF,
             );

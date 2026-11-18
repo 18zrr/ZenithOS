@@ -8,11 +8,11 @@ environment.
 ## Project status
 
 Version **0.1.0** was the first bootable release. An unreleased desktop update
-adds real PS/2 mouse input and a compositing window manager (focus/raise,
-dragging, resizing, minimise/maximise/close, taskbar, searchable Start menu and
-live accent colours). The system boots from bootloader handoff to an interactive
-shell with disk-backed storage and a graphical desktop on the Limine BIOS, UEFI
-and ISO paths. Details are in [Status](Status.md) and
+adds real PS/2 and USB HID mouse input and a compositing window manager
+(focus/raise, dragging, resizing, minimise/maximise/close, taskbar, searchable
+Start menu and live accent colours). The system boots from bootloader handoff to
+an interactive shell with disk-backed storage and a graphical desktop on the
+Limine BIOS, UEFI and ISO paths. Details are in [Status](Status.md) and
 [Release Notes](Release-Notes.md).
 
 ## Navigation

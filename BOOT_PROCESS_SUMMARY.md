@@ -63,4 +63,4 @@ once per second, demonstrating timer-driven task switching.
 
 - Higher-half paging (our own CR3 switch) and page-fault recovery; Limine's
   page tables and HHDM are used directly today.
-- Full e1000 packet TX/RX and USB device enumeration.
+- Full e1000 packet TX/RX; USB keyboard, hotplug and EHCI/xHCI support.

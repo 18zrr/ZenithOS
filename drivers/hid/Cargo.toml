@@ -1,0 +1,7 @@
+[package]
+name = "zenith-hid"
+version = "0.1.0"
+edition = "2021"
+description = "HID report-descriptor parsing and mouse decoding for Zenith OS"
+
+[lib]

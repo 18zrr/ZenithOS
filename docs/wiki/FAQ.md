@@ -44,18 +44,21 @@ networking is unproven. See [Drivers](Drivers.md).
 
 ## Do USB devices work?
 
-UHCI controller and port detection work, and a QEMU mouse is detected, but
-control transfers time out so device enumeration does not complete. USB mice
-therefore do not move the cursor; mouse input is PS/2 only. See
-[Drivers](Drivers.md).
+Partially. The UHCI host controller is initialised and a USB HID boot-protocol
+mouse is supported: the driver resets the port, enumerates the device through
+control transfers, selects the boot protocol, and polls its interrupt endpoint
+from the shell loop. It moves the cursor and clicks like the PS/2 mouse.
+EHCI/xHCI, USB keyboards, hotplug and other USB device classes are not
+implemented. See [Drivers](Drivers.md).
 
 ## Do the mouse and window manager work?
 
 Yes on the Limine BIOS, UEFI and ISO boot paths. The desktop is a software
-compositor: a PS/2 mouse on IRQ12 moves the cursor, and windows can be focused,
-dragged, resized, minimised, maximised, restored and closed. The Start menu
-opens with **F1** or a click, and supports typing to search. USB mice are not
-supported. See [Graphics](Graphics.md).
+compositor: a PS/2 mouse on IRQ12 or a USB HID boot-protocol mouse on UHCI
+moves the cursor, and windows can be focused, dragged, resized, minimised,
+maximised, restored and closed. Both devices share one event queue, and the
+System Monitor shows the active source. The Start menu opens with **F1** or a
+click, and supports typing to search. See [Graphics](Graphics.md).
 
 ## Can I run the bundled apps inside the OS?
 

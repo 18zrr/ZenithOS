@@ -30,10 +30,13 @@ redraws do not flicker.
 - **Windows**: Terminal, System Monitor, Settings and About. Every window has a
   title bar, app icon, minimise / maximise / close controls, a drop shadow when
   floating, and a bottom-right resize grip.
-- **Mouse**: PS/2 mouse on IRQ12. Move to highlight controls, click to focus or
+- **Mouse**: PS/2 mouse on IRQ12 and a USB HID boot-protocol mouse on UHCI.
+  Both feed one event queue: move to highlight controls, click to focus or
   raise a window, drag a title bar to move it, drag the corner grip to resize,
   use the taskbar to launch, restore or minimise apps, and change the accent
-  colour from the Settings window. USB mice are not supported yet.
+  colour from the Settings window. USB reports are polled from the shell loop.
+- **Text**: antialiased 10×20 monospaced glyphs, alpha-blended into the
+  composited frame and shared by the terminal and window manager.
 - **Taskbar**: centred Start button and pinned icons with running/focused
   indicators, a link-status indicator and the real-time clock read from CMOS.
 - **Start menu**: click Start or press **F1**. Type to filter apps, use the
@@ -96,9 +99,11 @@ implemented subsystems — nothing is simulated.
   because QEMU does not provide a linear framebuffer on that path.
 - Kernel: 64-bit boot trampoline, page tables with demand paging and a verified
   page-fault recovery test, IDT/PIC/PIT, serial + VGA consoles, compositing
-  window manager, cooperative scheduler, PS/2 keyboard and mouse, CMOS clock.
+  window manager, cooperative scheduler, PS/2 keyboard, PS/2 and USB HID mouse,
+  CMOS clock.
 - Drivers: PCI, ATA PIO read/write, ACPI RSDP, e1000 (TX/MAC/link), UHCI USB
-  controller + port detection, NVIDIA detection/probing, PS/2 mouse (IRQ12).
+  host controller with HID boot-protocol mouse enumeration and polling, NVIDIA
+  detection/probing, PS/2 mouse (IRQ12).
 - Zenith FS v5: write-ahead journaling with replay, extents, 64-bit file sizes
   and sparse files (tested with a 200 GiB file), Unix rwx permissions with
   owner/group and `chmod`/`chown`, nested directories, VFS trait. FAT32, NTFS
@@ -112,8 +117,9 @@ implemented subsystems — nothing is simulated.
 - The graphical desktop requires a Limine-provided linear framebuffer (BIOS,
   UEFI or ISO). QEMU's direct PVH/multiboot load has no framebuffer and stays
   text-only.
-- Mouse support is PS/2 only. USB HID enumeration is not complete, so USB mice
-  do not move the cursor.
+- USB support is UHCI only; QEMU's PIIX3 companion controller is the tested
+  host. EHCI/xHCI are not initialised, there is no hotplug or USB keyboard
+  support, and only one HID boot-protocol mouse is handled.
 - Compositing is software-only at 1024×768 (controlled by
   `boot/limine-native.conf`), capped at roughly 50 Hz. There is no GPU
   acceleration, HiDPI scaling, multi-monitor support, window snapping or
@@ -121,7 +127,6 @@ implemented subsystems — nothing is simulated.
 - UEFI boot was verified with **512 MiB** of guest RAM. With 128 MiB the Limine
   loader itself runs out of high memory before the kernel starts.
 - e1000 RX path is written but unvalidated; no live DHCP/UDP/TCP exchange.
-- USB device enumeration/control transfers time out under QEMU.
 - Scheduling is cooperative; no APIC preemption.
 - FAT32/NTFS/ext4 are read-only; no VFS mount table.
 - Native GPU driver (nouveau for RTX 4070 SUPER) and Linux compatibility are
@@ -149,6 +154,14 @@ qemu-system-x86_64 -drive format=raw,file=zenith.img -serial stdio
 qemu-system-x86_64 -cdrom zenith.iso -boot d -serial stdio
 ```
 
+QEMU's default PS/2 mouse works without extra flags. To attach a USB HID mouse
+as well, add `-usb -device usb-mouse`:
+
+```bash
+qemu-system-x86_64 -drive format=raw,file=zenith.img -serial stdio \
+  -usb -device usb-mouse
+```
+
 UEFI needs enough RAM for OVMF plus Limine; 512 MiB is the verified setting:
 ```bash
 cp /usr/share/edk2/x64/OVMF_VARS.4m.fd /tmp/zenith-vars.fd
@@ -171,10 +184,10 @@ qemu-system-x86_64 -cdrom zenith.iso -boot d -display none -serial stdio
 ```
 
 The ISO is **verified bootable** in QEMU: it loads Limine, the kernel, the
-compositor, the PS/2 mouse and the interactive shell. Note: the image is padded
-to 16 MiB because SeaBIOS/ATAPI in this QEMU build fails to read smaller ISOs.
-The disk images (`zenith.img`, `zenith-uefi.img`) remain the primary tested
-targets.
+compositor, PS/2 and USB HID mouse input, and the interactive shell. Note: the
+image is padded to 16 MiB because SeaBIOS/ATAPI in this QEMU build fails to read
+smaller ISOs. The disk images (`zenith.img`, `zenith-uefi.img`) remain the
+primary tested targets.
 
 If your VM displays the framebuffer rotated or mirrored (e.g. the taskbar
 appears at the top and text reads backwards), **press F12** in the VM. The first press
@@ -198,3 +211,7 @@ it is absent the scripts verify sources on the host target and say so.
 
 See `DEVELOPMENT_RULES.md`, `INTERFACES.md`, `ARCHITECTURE.md`, `ROADMAP.md`,
 and `DECISIONS.md`.
+
+The DejaVu Sans Mono glyph bitmap in `kernel/src/font.rs` is generated by
+`tools/generate_font.py`; the Bitstream Vera/DejaVu license is reproduced in
+`LICENSES/DejaVu.txt`.

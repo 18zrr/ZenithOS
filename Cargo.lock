@@ -81,10 +81,15 @@ name = "zenith-fs"
 version = "0.1.0"
 
 [[package]]
+name = "zenith-hid"
+version = "0.1.0"
+
+[[package]]
 name = "zenith-kernel"
 version = "0.1.0"
 dependencies = [
  "zenith-fs",
+ "zenith-hid",
 ]
 
 [[package]]

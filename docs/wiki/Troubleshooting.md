@@ -13,13 +13,16 @@ mode each time. For a permanent setting, rebuild with
 
 ## The mouse does not move the cursor
 
-- The driver is PS/2 only. USB mice are not supported because USB device
-  enumeration does not complete. Use QEMU's default PS/2 mouse, or pass an
-  explicit PS/2 mouse.
+- PS/2 works by default. For USB input, add `-usb -device usb-mouse` to the QEMU
+  command; `-device usb-mouse` without `-usb` fails with
+  `No 'usb-bus' bus found`.
+- Check the serial log for `[usb] HID mouse ready ep=0x81`. A boot with no USB
+  controller logs `[usb] controllers found: 0x0`. `[wm] compositor ... mouse=0`
+  means no pointing device initialised.
+- USB support is UHCI only; EHCI/xHCI controllers, USB keyboards, hubs, hotplug
+  and multiple HID devices are not supported.
 - In QEMU, make sure the display is shown (drop `-display none`); a headless VM
   still runs the desktop but you cannot interact with it.
-- Check the serial log for `[wm] compositor 1024x768, mouse=1`. `mouse=0` means
-  PS/2 initialisation failed.
 - If the pointer moves but clicks miss, remember the compositor runs at
   1024×768; a scaled or rotated display changes where you must click. See
   [Graphics](Graphics.md).
@@ -74,12 +77,13 @@ e1000 transmit works and ARP/DHCP/UDP/TCP frames are constructed and sent, but
 the receive path has never received a packet in QEMU. End-to-end networking is
 unproven — see [Drivers](Drivers.md).
 
-## USB devices do not enumerate
+## A USB device is not detected
 
-UHCI controller and port detection work (a QEMU mouse is detected), but control
-transfers time out, so no device enumeration or HID driver exists. This is
-expected behaviour in this revision, not a misconfiguration. Mouse input is PS/2
-only.
+Only UHCI host controllers and a single HID boot-protocol mouse are supported.
+EHCI/xHCI controllers, USB keyboards, hubs, hotplug and other device classes are
+not implemented, so those devices are expected to be ignored. Attach a mouse
+with `-usb -device usb-mouse` and look for the `[usb] HID mouse ready` line in
+the serial log. See [Drivers](Drivers.md).
 
 ## UEFI boot stops in the Limine loader
 
