@@ -6,7 +6,10 @@ use crate::sync::SpinLock;
 use crate::timer;
 
 const MAX_TASKS: usize = 3;
-const STACK_SIZE: usize = 16 * 1024;
+// Filesystem mount alone uses over 17 KiB in the release build, on top of
+// the shell history, installer and interrupt frames. Keep room for that
+// nested call chain; 16 KiB corrupted neighbouring scheduler state.
+const STACK_SIZE: usize = 128 * 1024;
 
 #[repr(align(16))]
 struct AlignedStack([u8; STACK_SIZE]);

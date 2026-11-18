@@ -1,5 +1,8 @@
 # Graphics
 
+See [Display settings](Display-Settings.md) for the new boot-resolution
+presets, custom-resolution configuration and monitor refresh-rate limitations.
+
 Zenith OS graphics come from a **Limine-provided linear framebuffer** (VBE on
 BIOS, GOP on UEFI). There is no native GPU driver.
 
@@ -25,7 +28,7 @@ The desktop is a Windows 11-inspired compositing environment implemented in
   avoids the tearing and flicker of direct per-widget framebuffer drawing.
 - **Dirty redraws**: a frame is only composed when something changed (input,
   focus, window state, menu state, caret blink or clock minute) and never more
-  than roughly 50 times per second.
+   than 100 times per second. This is a software frame cap, not monitor Hz.
 - **Windows**: Terminal, System Monitor, Settings and About. Each has a title
   bar with a per-app icon letter, minimise / maximise / close buttons, rounded
   corners, a drop shadow while floating, and a bottom-right resize grip.
@@ -107,7 +110,7 @@ See [Troubleshooting](Troubleshooting.md) for display problems.
 - No native GPU driver; `nvidia.rs` only detects devices and reads boot
   registers (no GSP firmware, engine programming, or mode setting). All
   compositing is done on the CPU.
-- Fixed 1024×768 software compositor with no HiDPI scaling, multi-monitor
+- Boot-selected software framebuffer with no live mode switching, HiDPI scaling, multi-monitor
   support, window snapping, Alt-Tab switcher, or animations.
 - Mouse input works over PS/2 and USB HID. USB support is UHCI only: EHCI/xHCI,
   hotplug, USB keyboards and multiple HID devices are not supported.

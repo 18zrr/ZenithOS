@@ -191,6 +191,10 @@ fn run_inner() {
     render(step, selection, progress, result);
 
     loop {
+        // The shell normally services these. The modal wizard owns its loop,
+        // so USB input and PS/2 repeat must continue to be polled here.
+        keyboard::poll();
+        crate::usb::poll();
         while let Some(event) = keyboard::take_event() {
             if !event.pressed {
                 continue;
@@ -224,8 +228,20 @@ fn run_inner() {
                             step = 3;
                             progress = 0;
                             start_tick = timer::ticks();
-                            result = Some(fs::installer_write().is_ok());
                             render(step, selection, progress, result);
+                            crate::diagnostics::serial_puts("[installer] writing manifest\n");
+                            result = Some(match fs::installer_write() {
+                                Ok(()) => {
+                                    crate::diagnostics::serial_puts("[installer] manifest saved\n");
+                                    true
+                                }
+                                Err(error) => {
+                                    crate::diagnostics::serial_puts("[installer] failed: ");
+                                    crate::diagnostics::serial_puts(error);
+                                    crate::diagnostics::serial_puts("\n");
+                                    false
+                                }
+                            });
                         }
                     }
                     3 => {}

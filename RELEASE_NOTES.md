@@ -1,5 +1,38 @@
 # Zenith OS — Unreleased desktop update
 
+## Display configuration and installer fixes (unreleased)
+
+- Added Limine boot presets for 1280×720, 1920×1080, 2560×1440 and
+  3840×2160, alongside the existing normal, safe-graphics and recovery entries.
+- Added `tools/configure_display.py WIDTHxHEIGHT` to configure the normal
+  boot entry before rebuilding images.
+- Expanded the kernel heap from 16 MiB to 128 MiB for the three compositor
+  buffers needed at 4K; updated the System Monitor heap gauge.
+- Fixed the installer stack overflow by increasing task stacks to 128 KiB.
+- Restored input polling inside the modal installer and added serial logs
+  for manifest-write success/failure.
+- Fixed a missing Limine command-line stub in the direct-boot assembly.
+
+Resolution support depends on the firmware's available modes. These are
+boot-time requests, not live GPU mode setting. **Physical monitor refresh-rate
+switching is not implemented**; the compositor frame cap is not monitor Hz.
+See [Display settings](docs/wiki/Display-Settings.md).
+
+Suggested release: **v0.2.0**, after review and testing on the target machines.
+Version identifiers and Git tags have not been changed.
+
+Verified for this display change: QEMU BIOS/ISO boots at 720p, Full HD,
+1440p and 4K with 512 MiB RAM. 4K requires sufficient virtual VRAM
+(`-vga std -global VGA.vgamem_mb=64` in the test). Default VGA memory
+produced a firmware fallback instead. Physical hardware remains unverified.
+
+---
+
+## Earlier desktop-update notes
+
+The following records the earlier verification baseline; display configuration
+and memory sizes above supersede its fixed-resolution descriptions.
+
 **2026-11-18 · x86_64 · Limine bootloader**
 
 This update adds real PS/2 and USB HID mouse input and a compositing window

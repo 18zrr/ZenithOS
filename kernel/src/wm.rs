@@ -1676,7 +1676,7 @@ impl Wm {
         let bar_w = card_w.saturating_sub(28);
         let bar_y = memory_y + 94;
         rounded_rect(frame, stride, height, label_x, bar_y, bar_w, 8, 4, 0x0025_3140);
-        let filled = (crate::allocator::used() * bar_w / (16 * 1024 * 1024)).min(bar_w);
+        let filled = (crate::allocator::used() * bar_w / crate::allocator::HEAP_SIZE).min(bar_w);
         if filled > 0 {
             rounded_rect(frame, stride, height, label_x, bar_y, filled, 8, 4, self.accent);
         }
@@ -1687,7 +1687,7 @@ impl Wm {
             label_x,
             bar_y + 14,
             max_x,
-            "Heap usage of the 16 MiB pool",
+            "Heap usage of the 128 MiB pool",
             DIM,
         );
 

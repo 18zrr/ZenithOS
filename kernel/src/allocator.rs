@@ -3,9 +3,9 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-// The compositor allocates a full-screen frame buffer and a cached wallpaper
-// (2 x width x height x 4 bytes). 16 MiB leaves comfortable headroom.
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
+// Wallpaper, composition and previous-frame buffers need ~95 MiB at 4K.
+// Include headroom for filesystem and other kernel allocations.
+pub const HEAP_SIZE: usize = 128 * 1024 * 1024;
 
 static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 static OFFSET: AtomicUsize = AtomicUsize::new(0);
