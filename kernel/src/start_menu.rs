@@ -5,12 +5,13 @@
 
 use crate::sync::SpinLock;
 
-pub const APPS: [(&str, u32); 5] = [
+pub const APPS: [(&str, u32); 6] = [
     ("Terminal", 0x0000_78D4),
     ("Monitor", 0x004E_96C2),
     ("Settings", 0x0071_BA78),
     ("About", 0x008A_4A9E),
     ("Installer", 0x00E1_7055),
+    ("Browser", 0x0025_83BB),
 ];
 
 pub const APP_COUNT: usize = APPS.len();

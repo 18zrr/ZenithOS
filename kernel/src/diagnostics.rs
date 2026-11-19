@@ -111,6 +111,12 @@ pub fn putc(byte: u8) {
     }
 }
 
+/// Echo a byte to both COM1 and the active console.
+pub fn console_putc(byte: u8) {
+    putc(byte);
+    visible_putc(byte);
+}
+
 /// Write a string, translating `\n` to CRLF for serial terminals.
 pub fn puts(message: &str) {
     for &byte in message.as_bytes() {

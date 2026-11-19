@@ -14,6 +14,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::display;
+use crate::browser_bridge as browser;
 use crate::font::{blend, COL_PITCH, FONT, GLYPH_HEIGHT, GLYPH_WIDTH, ROW_PITCH};
 use crate::framebuffer as fb;
 use crate::keyboard::{Key, KeyEvent};
@@ -22,6 +24,18 @@ use crate::{diagnostics, e1000, limine, mouse, rtc, start_menu, timer};
 
 const MAX_WINDOWS: usize = 8;
 const TITLEBAR_H: usize = 40;
+/// Preallocated compositor surface, large enough for 4K. All three full-screen
+/// buffers are allocated once so a mode change never needs to grow the bump
+/// heap or leak the previous resolution's surfaces.
+const MAX_SURFACE_PIXELS: usize = 3840 * 2160;
+const DISPLAY_CARD_H: usize = 214;
+const DISPLAY_PRESETS: [(usize, usize, &str); 4] = [
+    (1280, 720, "720p"),
+    (1920, 1080, "1080p"),
+    (2560, 1440, "1440p"),
+    (3840, 2160, "4K"),
+];
+const CUSTOM_CAPACITY: usize = 12;
 /// Space reserved for the floating dock, including its bottom margin.
 const TASKBAR_H: usize = 80;
 const DOCK_H: usize = 64;
@@ -52,6 +66,8 @@ const MUTED: u32 = 0x009A_A7B8;
 const DIM: u32 = 0x006B_778A;
 const CLOSE_HOVER: u32 = 0x00E8_1111;
 const SHADOW: u32 = 0x0002_060C;
+const STATUS_OK: u32 = 0x0055_C08A;
+const STATUS_WARN: u32 = 0x00E0_A030;
 
 const ACCENTS: [u32; 4] = [0x0000_78D4, 0x0003_8387, 0x0087_64B8, 0x00CA_5010];
 const ACCENT_NAMES: [&str; 4] = ["Azure", "Teal", "Violet", "Amber"];
@@ -59,11 +75,13 @@ const ACCENT_NAMES: [&str; 4] = ["Azure", "Teal", "Violet", "Amber"];
 static DIRTY: AtomicBool = AtomicBool::new(false);
 static SAFE_MODE: AtomicBool = AtomicBool::new(false);
 static NEXT_FRAME: AtomicU64 = AtomicU64::new(0);
+static NEXT_BROWSER_CHECK: AtomicU64 = AtomicU64::new(0);
 static LAST_CARET: AtomicBool = AtomicBool::new(false);
 static LAST_MINUTE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WindowKind {
+    Browser,
     Terminal,
     Monitor,
     Settings,
@@ -73,6 +91,7 @@ pub enum WindowKind {
 impl WindowKind {
     fn title(self) -> &'static str {
         match self {
+            WindowKind::Browser => "Browser - Chromium companion",
             WindowKind::Terminal => "Terminal",
             WindowKind::Monitor => "System Monitor",
             WindowKind::Settings => "Settings",
@@ -82,6 +101,7 @@ impl WindowKind {
 
     fn color(self) -> u32 {
         match self {
+            WindowKind::Browser => 0x0025_83BB,
             WindowKind::Terminal => 0x0000_78D4,
             WindowKind::Monitor => 0x004E_96C2,
             WindowKind::Settings => 0x0071_BA78,
@@ -91,6 +111,7 @@ impl WindowKind {
 
     fn letter(self) -> u8 {
         match self {
+            WindowKind::Browser => b'B',
             WindowKind::Terminal => b'T',
             WindowKind::Monitor => b'M',
             WindowKind::Settings => b'S',
@@ -147,6 +168,12 @@ struct Wm {
     accent: u32,
     dragging: Option<Drag>,
     resizing: Option<Resize>,
+    browser_buttons: u8,
+    display_input: [u8; CUSTOM_CAPACITY],
+    display_input_len: usize,
+    display_input_active: bool,
+    display_status: [u8; 64],
+    display_status_len: usize,
 }
 
 impl Wm {
@@ -164,6 +191,12 @@ impl Wm {
             accent: ACCENTS[0],
             dragging: None,
             resizing: None,
+            browser_buttons: 0,
+            display_input: [0; CUSTOM_CAPACITY],
+            display_input_len: 0,
+            display_input_active: false,
+            display_status: [0; 64],
+            display_status_len: 0,
         }
     }
 }
@@ -175,6 +208,8 @@ static WM: crate::sync::SpinLock<Wm> = crate::sync::SpinLock::new(Wm::new());
 pub enum Action {
     None,
     Installer,
+    /// Apply a live display mode outside the window-manager lock.
+    DisplayMode(usize, usize),
 }
 
 // ---------------------------------------------------------------------------
@@ -617,11 +652,17 @@ pub fn init() {
     }
     wm.width = width;
     wm.height = height;
-    wm.wallpaper = build_wallpaper(width, height);
-    let mut frame = vec![0u32; width.saturating_mul(height)];
-    frame.copy_from_slice(&wm.wallpaper);
-    wm.frame = frame;
-    wm.presented = Vec::new();
+    wm.wallpaper = vec![0u32; MAX_SURFACE_PIXELS];
+    fill_wallpaper(&mut wm.wallpaper, width, height);
+    wm.frame = vec![0u32; MAX_SURFACE_PIXELS];
+    let pixels = width.saturating_mul(height);
+    let wallpaper = mem::take(&mut wm.wallpaper);
+    wm.frame[..pixels].copy_from_slice(&wallpaper[..pixels]);
+    wm.wallpaper = wallpaper;
+    // Keep the capacity but start empty, so the first composite is a full
+    // present; the damage path then compares only the active viewport.
+    wm.presented = vec![0u32; MAX_SURFACE_PIXELS];
+    wm.presented.clear();
     wm.initialized = true;
     wm.open_window(WindowKind::Terminal);
     drop(wm);
@@ -645,6 +686,168 @@ pub fn render_now() {
     render();
 }
 
+/// Apply a display mode requested from Settings. Runs outside the
+/// window-manager lock so the compositor can rebuild itself afterwards.
+pub fn apply_display(width: usize, height: usize) -> Result<(), &'static str> {
+    match display::set_mode(width, height) {
+        Ok(()) => {
+            on_display_change(width, height);
+            let mut wm = WM.lock();
+            if wm.initialized {
+                let mut text = TextBuffer::new();
+                text.push_str("Applied ");
+                text.push_dec(width as u64);
+                text.push(b'x');
+                text.push_dec(height as u64);
+                wm.set_display_status(text.as_str());
+            }
+            drop(wm);
+            invalidate();
+            Ok(())
+        }
+        Err(message) => {
+            let mut wm = WM.lock();
+            if wm.initialized {
+                wm.set_display_status(message);
+            }
+            drop(wm);
+            invalidate();
+            Err(message)
+        }
+    }
+}
+
+/// Rebuild the cached wallpaper and clamp windows after a mode change.
+fn on_display_change(width: usize, height: usize) {
+    let pixels = width.saturating_mul(height);
+    if width == 0 || height == 0 || pixels > MAX_SURFACE_PIXELS {
+        return;
+    }
+
+    mouse::set_bounds(width, height);
+
+    let mut wm = WM.lock();
+    if !wm.initialized || wm.wallpaper.len() < pixels || wm.frame.len() < pixels {
+        return;
+    }
+    wm.width = width;
+    wm.height = height;
+    fill_wallpaper(&mut wm.wallpaper, width, height);
+    let wallpaper = mem::take(&mut wm.wallpaper);
+    wm.frame[..pixels].copy_from_slice(&wallpaper[..pixels]);
+    wm.wallpaper = wallpaper;
+    wm.presented.clear();
+
+    let available_h = height.saturating_sub(TASKBAR_H);
+    for slot in wm.windows.iter_mut() {
+        let Some(window) = slot else {
+            continue;
+        };
+        if window.maximized {
+            window.x = 8;
+            window.y = 8;
+            window.w = width.saturating_sub(16);
+            window.h = available_h.saturating_sub(16);
+            continue;
+        }
+        window.w = window.w.min(width.saturating_sub(16)).max(320);
+        window.h = window.h.min(available_h.saturating_sub(16)).max(220);
+        let max_x = (width as i32 - window.w as i32).max(8);
+        let max_y = (available_h as i32 - window.h as i32).max(8);
+        window.x = window.x.clamp(8, max_x);
+        window.y = window.y.clamp(8, max_y);
+    }
+    drop(wm);
+
+    invalidate();
+    render();
+}
+
+/// Keyboard handling for the Settings custom-resolution field. Returns an
+/// action that the caller applies after releasing the window-manager lock.
+pub fn settings_key(event: KeyEvent) -> Option<Action> {
+    if !event.pressed {
+        return None;
+    }
+    let mut wm = WM.lock();
+    if !wm.initialized || !wm.settings_focused() || !wm.display_input_active {
+        return None;
+    }
+
+    match event.key {
+        Key::Char(byte) if byte.is_ascii_digit() || byte == b'x' || byte == b'X' => {
+            if wm.display_input_len < CUSTOM_CAPACITY {
+                let index = wm.display_input_len;
+                wm.display_input[index] = byte;
+                wm.display_input_len += 1;
+                invalidate();
+            }
+            None
+        }
+        Key::Backspace => {
+            if wm.display_input_len > 0 {
+                wm.display_input_len -= 1;
+                invalidate();
+            }
+            None
+        }
+        Key::Escape => {
+            wm.display_input_active = false;
+            wm.set_display_status("Custom resolution cancelled");
+            invalidate();
+            None
+        }
+        Key::Enter => {
+            let input = &wm.display_input[..wm.display_input_len];
+            match parse_dimensions(input) {
+                Some((w, h)) => match display::validate(w, h) {
+                    Ok(()) => {
+                        wm.display_input_active = false;
+                        Some(Action::DisplayMode(w, h))
+                    }
+                    Err(message) => {
+                        wm.set_display_status(message);
+                        invalidate();
+                        None
+                    }
+                },
+                None => {
+                    wm.set_display_status("Type WIDTHxHEIGHT, for example 1920x1080");
+                    invalidate();
+                    None
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_dimensions(bytes: &[u8]) -> Option<(usize, usize)> {
+    let separator = bytes
+        .iter()
+        .position(|byte| *byte == b'x' || *byte == b'X')?;
+    let width = parse_decimal(&bytes[..separator])?;
+    let height = parse_decimal(&bytes[separator + 1..])?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((width, height))
+}
+
+fn parse_decimal(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut value = 0usize;
+    for byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((*byte - b'0') as usize)?;
+    }
+    Some(value)
+}
+
 /// Called from the shell loop. Rates-limit redraws to roughly 100 Hz.
 pub fn tick() {
     if !initialized() {
@@ -652,6 +855,15 @@ pub fn tick() {
     }
 
     let now = timer::ticks();
+    if now >= NEXT_BROWSER_CHECK.load(Ordering::Relaxed) {
+        NEXT_BROWSER_CHECK.store(now + 4, Ordering::Relaxed);
+        if browser::changed() {
+            let wm = WM.lock();
+            if wm.find(WindowKind::Browser).and_then(|i| wm.windows[i]).is_some_and(|w| !w.minimized) {
+                invalidate();
+            }
+        }
+    }
     let caret_phase = terminal_focused() && (now / 25) % 2 == 0;
     if caret_phase != LAST_CARET.load(Ordering::Relaxed) {
         LAST_CARET.store(caret_phase, Ordering::Relaxed);
@@ -735,6 +947,34 @@ pub fn menu_key(event: KeyEvent) -> Action {
     }
 }
 
+/// True when the Settings custom-resolution field owns keyboard input.
+pub fn settings_input_active() -> bool {
+    let wm = WM.lock();
+    wm.initialized && wm.settings_focused() && wm.display_input_active
+}
+
+/// Raise and focus the terminal window. Returns false when no terminal exists.
+pub fn focus_terminal() -> bool {
+    let mut wm = WM.lock();
+    if !wm.initialized {
+        return false;
+    }
+    let Some(index) = wm.find(WindowKind::Terminal) else {
+        return false;
+    };
+    if let Some(window) = wm.windows[index] {
+        if window.minimized {
+            let mut window = window;
+            window.minimized = false;
+            wm.windows[index] = Some(window);
+        }
+    }
+    wm.focus_index(index);
+    drop(wm);
+    invalidate();
+    true
+}
+
 /// True when the terminal is the topmost visible window, so typed characters
 /// belong to the shell.
 pub fn terminal_focused() -> bool {
@@ -753,6 +993,26 @@ pub fn terminal_focused() -> bool {
     }
 }
 
+pub fn open_browser() {
+    let mut wm = WM.lock();
+    if wm.initialized {
+        wm.open_window(WindowKind::Browser);
+    } else {
+        drop(wm);
+        diagnostics::println("Browser requires the graphical desktop.");
+    }
+}
+
+pub fn browser_key(event: KeyEvent) -> bool {
+    let wm = WM.lock();
+    if wm.top_visible().and_then(|i| wm.windows[i]).is_some_and(|w| w.kind == WindowKind::Browser) {
+        browser::key(event);
+        true
+    } else {
+        false
+    }
+}
+
 /// Drain queued mouse events and update the desktop. Runs in the shell task.
 pub fn pump() -> Action {
     let mut wm = WM.lock();
@@ -762,6 +1022,7 @@ pub fn pump() -> Action {
 
     let mut action = Action::None;
     while let Some(event) = mouse::take_event() {
+        if wm.browser_pointer(event) { continue; }
         match event.kind {
             mouse::EVENT_MOVE => {
                 wm.handle_move(event.x, event.y);
@@ -798,26 +1059,7 @@ fn activate_selected() -> Action {
     };
     start_menu::close();
     invalidate();
-    match app {
-        0 => {
-            WM.lock().open_window(WindowKind::Terminal);
-            Action::None
-        }
-        1 => {
-            WM.lock().open_window(WindowKind::Monitor);
-            Action::None
-        }
-        2 => {
-            WM.lock().open_window(WindowKind::Settings);
-            Action::None
-        }
-        3 => {
-            WM.lock().open_window(WindowKind::About);
-            Action::None
-        }
-        4 => Action::Installer,
-        _ => Action::None,
-    }
+    WM.lock().launch(app)
 }
 
 // ---------------------------------------------------------------------------
@@ -832,12 +1074,15 @@ fn render() {
         return;
     }
     let mut frame = mem::take(&mut wm.frame);
-    if frame.len() < wm.width.saturating_mul(wm.height) {
+    let stride = wm.width;
+    let height = wm.height;
+    let pixels = stride.saturating_mul(height);
+    if frame.len() < pixels || wm.wallpaper.len() < pixels {
         wm.frame = frame;
         return;
     }
 
-    frame.copy_from_slice(&wm.wallpaper);
+    frame[..pixels].copy_from_slice(&wm.wallpaper[..pixels]);
 
     let (mouse_x, mouse_y) = mouse::position();
     wm.draw_windows(&mut frame, mouse_x, mouse_y);
@@ -847,14 +1092,11 @@ fn render() {
     }
     draw_cursor(&mut frame, wm.width, wm.height, mouse_x, mouse_y);
 
-    let stride = wm.width;
-    let height = wm.height;
-    let full = fb::take_display_changed()
-        || wm.presented.len() != stride.saturating_mul(height);
+    let full = fb::take_display_changed() || wm.presented.len() != pixels;
     if full {
-        fb::present(&frame);
+        fb::present(&frame[..pixels]);
         wm.presented.clear();
-        wm.presented.extend_from_slice(&frame);
+        wm.presented.extend_from_slice(&frame[..pixels]);
     } else {
         // Present and remember contiguous runs of changed rows. Idle frames
         // therefore leave VRAM untouched, while a moving cursor costs only the
@@ -901,6 +1143,19 @@ impl Wm {
             }
         }
         None
+    }
+
+    fn settings_focused(&self) -> bool {
+        self.top_visible()
+            .and_then(|index| self.windows.get(index).and_then(|window| *window))
+            .map(|window| window.kind == WindowKind::Settings)
+            .unwrap_or(false)
+    }
+
+    fn set_display_status(&mut self, text: &str) {
+        let length = text.len().min(self.display_status.len() - 1);
+        self.display_status[..length].copy_from_slice(&text.as_bytes()[..length]);
+        self.display_status_len = length;
     }
 
     fn focus_index(&mut self, index: usize) {
@@ -964,6 +1219,10 @@ impl Wm {
         let cascade = (self.order_len as i32 % 4) * 26;
         let available_h = self.height.saturating_sub(TASKBAR_H);
         let (w, h) = match kind {
+            WindowKind::Browser => (
+                (browser::WIDTH + 4).min(self.width.saturating_sub(24)),
+                (browser::HEIGHT + TITLEBAR_H + 4).min(available_h.saturating_sub(16)),
+            ),
             WindowKind::Terminal => (
                 760usize.min(self.width.saturating_sub(120)).max(360),
                 500usize.min(available_h.saturating_sub(96)).max(260),
@@ -974,7 +1233,7 @@ impl Wm {
             ),
             WindowKind::Settings => (
                 600usize.min(self.width.saturating_sub(100)).max(380),
-                470usize.min(available_h.saturating_sub(60)).max(320),
+                580usize.min(available_h.saturating_sub(20)).max(320),
             ),
             WindowKind::About => (
                 480usize.min(self.width.saturating_sub(100)).max(340),
@@ -1039,6 +1298,42 @@ impl Wm {
         window.y = new_y.clamp(0, max_y);
         self.windows[drag.window] = Some(window);
         invalidate();
+    }
+
+    fn browser_pointer(&mut self, event: mouse::MouseEvent) -> bool {
+        if self.dragging.is_some() || self.resizing.is_some() { return false; }
+        let Some(index) = self.find(WindowKind::Browser) else { return false };
+        let window = self.windows[index].unwrap();
+        let rect = browser_view(&window);
+        if self.browser_buttons == 0 && (!rect.contains(event.x, event.y)
+            || !matches!(self.hit_test(event.x, event.y), Hit::Body(i) if i == index)
+            || start_menu::is_open()) { return false; }
+        let x = ((event.x - rect.x).clamp(0, rect.w as i32 - 1) as usize) * browser::WIDTH / rect.w;
+        let y = ((event.y - rect.y).clamp(0, rect.h as i32 - 1) as usize) * browser::HEIGHT / rect.h;
+        let button = match event.button {
+            mouse::BUTTON_LEFT => 1, mouse::BUTTON_MIDDLE => 2, mouse::BUTTON_RIGHT => 3,
+            mouse::BUTTON_BACK => 8, mouse::BUTTON_FORWARD => 9, _ => 0,
+        };
+        match event.kind {
+            mouse::EVENT_MOVE => browser::pointer(2, 0, x, y),
+            mouse::EVENT_BUTTON_DOWN => {
+                self.focus_index(index);
+                self.browser_buttons |= event.button;
+                browser::pointer(3, button, x, y);
+            }
+            mouse::EVENT_BUTTON_UP => {
+                self.browser_buttons &= !event.button;
+                browser::pointer(4, button, x, y);
+            }
+            mouse::EVENT_WHEEL => {
+                for _ in 0..event.scroll.unsigned_abs().min(8) {
+                    browser::pointer(5, if event.scroll > 0 { 4 } else { 5 }, x, y);
+                }
+            }
+            _ => return false,
+        }
+        invalidate();
+        true
     }
 
     fn handle_click(&mut self, x: i32, y: i32) -> Action {
@@ -1172,6 +1467,40 @@ impl Wm {
                 self.accent = ACCENTS[swatch.min(ACCENTS.len() - 1)];
                 invalidate();
             }
+            Hit::DisplayPreset(index) => {
+                let (width, height, _) = DISPLAY_PRESETS[index.min(DISPLAY_PRESETS.len() - 1)];
+                self.display_input_active = false;
+                invalidate();
+                return Action::DisplayMode(width, height);
+            }
+            Hit::DisplayCustom => {
+                self.display_input_active = true;
+                self.set_display_status("Type WIDTHxHEIGHT, then press Enter");
+                invalidate();
+            }
+            Hit::DisplayApply => {
+                match parse_dimensions(&self.display_input[..self.display_input_len]) {
+                    Some((width, height)) => match display::validate(width, height) {
+                        Ok(()) => {
+                            self.display_input_active = false;
+                            invalidate();
+                            return Action::DisplayMode(width, height);
+                        }
+                        Err(message) => {
+                            self.set_display_status(message);
+                            invalidate();
+                        }
+                    },
+                    None => {
+                        self.set_display_status("Type WIDTHxHEIGHT, for example 1920x1080");
+                        invalidate();
+                    }
+                }
+            }
+            Hit::DisplayRefresh => {
+                self.set_display_status("Refresh rate is controlled by the host display");
+                invalidate();
+            }
             Hit::MenuApp(app) => {
                 // Only reachable when the menu was already closed above.
                 invalidate();
@@ -1211,6 +1540,7 @@ impl Wm {
             2 => self.open_window(WindowKind::Settings),
             3 => self.open_window(WindowKind::About),
             4 => return Action::Installer,
+            5 => self.open_window(WindowKind::Browser),
             _ => {}
         }
         invalidate();
@@ -1273,6 +1603,9 @@ impl Wm {
             if window.kind == WindowKind::Settings {
                 if let Some(swatch) = settings_swatch_at(&window, x, y) {
                     return Hit::Swatch(swatch);
+                }
+                if let Some(control) = display_control_at(&window, x, y) {
+                    return control;
                 }
             }
             return Hit::Body(index);
@@ -1466,6 +1799,13 @@ impl Wm {
         }
 
         match window.kind {
+            WindowKind::Browser => {
+                let r = browser_view(window);
+                if !browser::draw(frame, stride, height, r.x, r.y, r.w, r.h) {
+                    draw_text(frame, stride, height, x + 16, y + 60, x + w as i32 - 8,
+                        "Start the VM with python3 tools/run_browser.py", FG);
+                }
+            }
             WindowKind::Terminal => self.draw_terminal(frame, window, active),
             WindowKind::Monitor => self.draw_monitor(frame, window),
             WindowKind::Settings => self.draw_settings(frame, window, mouse_x, mouse_y),
@@ -1810,39 +2150,154 @@ impl Wm {
             }
         }
 
-        // Display card.
-        let display_y = y + 152;
-        self.card(frame, x, display_y, card_w, 112, "Display");
+        // Display card: live mode selection for adapters with a guest-side
+        // Bochs VBE interface, plus an honest notice for everything else.
+        let controls = display_controls(window);
+        let display_y = controls.display_y;
+        self.card(frame, x, display_y, card_w, DISPLAY_CARD_H, "Display");
+
         let mut resolution = TextBuffer::new();
         resolution.push_dec(self.width as u64);
         resolution.push(b'x');
         resolution.push_dec(self.height as u64);
-        resolution.push_str("x32");
+        resolution.push_str("x32  ");
+        resolution.push_str(display::backend_name());
         self.monitor_row(
             frame,
             label_x,
-            display_y + 42,
+            display_y + 40,
             max_x,
-            "Resolution",
+            "Current",
             resolution.as_str(),
         );
-        let orientation = match fb::orientation() {
-            (false, false) => "Normal",
-            (true, false) => "Mirror X",
-            (true, true) => "Rotated 180",
-            (false, true) => "Flip Y",
+
+        draw_text(
+            frame,
+            stride,
+            height,
+            label_x,
+            display_y + 64,
+            max_x,
+            "Resolution",
+            MUTED,
+        );
+
+        for (index, preset) in controls.presets.iter().enumerate() {
+            let (width, height_px, label) = DISPLAY_PRESETS[index];
+            let selected = self.width == width && self.height == height_px;
+            draw_button(
+                frame,
+                stride,
+                height,
+                preset,
+                label,
+                selected,
+                preset.contains(mouse_x, mouse_y),
+                self.accent,
+            );
+        }
+
+        draw_text(
+            frame,
+            stride,
+            height,
+            label_x,
+            display_y + 124,
+            max_x,
+            "Custom",
+            MUTED,
+        );
+
+        let field_border = if self.display_input_active {
+            self.accent
+        } else {
+            CARD_LINE
         };
+        rounded_rect(
+            frame,
+            stride,
+            height,
+            controls.custom.x,
+            controls.custom.y,
+            controls.custom.w,
+            controls.custom.h,
+            5,
+            field_border,
+        );
+        rounded_rect(
+            frame,
+            stride,
+            height,
+            controls.custom.x + 1,
+            controls.custom.y + 1,
+            controls.custom.w.saturating_sub(2),
+            controls.custom.h.saturating_sub(2),
+            4,
+            SEARCH_BG,
+        );
+        let input = core::str::from_utf8(&self.display_input[..self.display_input_len])
+            .unwrap_or("");
+        let (field_text, field_color) = if input.is_empty() && !self.display_input_active {
+            ("1920x1080", DIM)
+        } else {
+            (input, FG)
+        };
+        draw_text(
+            frame,
+            stride,
+            height,
+            controls.custom.x + 8,
+            controls.custom.y + 3,
+            controls.custom.x + controls.custom.w as i32 - 8,
+            field_text,
+            field_color,
+        );
+        draw_button(
+            frame,
+            stride,
+            height,
+            &controls.apply,
+            "Apply",
+            false,
+            controls.apply.contains(mouse_x, mouse_y),
+            self.accent,
+        );
+
         self.monitor_row(
             frame,
             label_x,
-            display_y + 66,
+            display_y + 154,
             max_x,
-            "Orientation",
-            orientation,
+            "Refresh rate",
+            if display::available() {
+                "Host-controlled"
+            } else {
+                "Firmware-controlled"
+            },
         );
 
+        if self.display_status_len > 0 {
+            let status = core::str::from_utf8(&self.display_status[..self.display_status_len])
+                .unwrap_or("");
+            let color = if status.starts_with("Applied") {
+                STATUS_OK
+            } else {
+                STATUS_WARN
+            };
+            draw_text(
+                frame,
+                stride,
+                height,
+                label_x,
+                display_y + 180,
+                max_x,
+                status,
+                color,
+            );
+        }
+
         // Input card.
-        let input_y = display_y + 122;
+        let input_y = display_y + DISPLAY_CARD_H as i32 + 10;
         self.card(frame, x, input_y, card_w, 116, "Input");
         self.monitor_row(
             frame,
@@ -1901,7 +2356,7 @@ impl Wm {
         );
         let y = top + 78;
         draw_text_centered(frame, stride, height, center, y, "ZENITH OS", self.accent);
-        draw_text_centered(frame, stride, height, center, y + 26, "Version 0.1.0", FG);
+        draw_text_centered(frame, stride, height, center, y + 26, "Version 0.2.0", FG);
         draw_text_centered(
             frame,
             stride,
@@ -2175,7 +2630,7 @@ impl Wm {
             panel.right() - 24 - 10 * COL_PITCH as i32,
             panel.y + 20,
             panel.right() - 16,
-            "Zenith 0.1",
+            "Zenith 0.2",
             DIM,
         );
 
@@ -2415,6 +2870,10 @@ enum Hit {
     Resize(usize),
     Body(usize),
     Swatch(usize),
+    DisplayPreset(usize),
+    DisplayCustom,
+    DisplayApply,
+    DisplayRefresh,
     Desktop,
 }
 
@@ -2492,6 +2951,15 @@ fn window_contains(window: &Window, x: i32, y: i32) -> bool {
         && y < window.y + window.h as i32
 }
 
+fn browser_view(window: &Window) -> Rect {
+    let w = window.w - 4;
+    let h = window.h - TITLEBAR_H - 4;
+    let vw = w.min(h * browser::WIDTH / browser::HEIGHT).max(1);
+    let vh = (vw * browser::HEIGHT / browser::WIDTH).max(1);
+    Rect::new(window.x + 2 + ((w - vw) / 2) as i32,
+              window.y + TITLEBAR_H as i32 + 2 + ((h - vh) / 2) as i32, vw, vh)
+}
+
 fn control_rects(window: &Window) -> [Rect; 3] {
     let close = Rect::new(
         window.x + window.w as i32 - 46,
@@ -2518,6 +2986,76 @@ fn settings_swatch_at(window: &Window, x: i32, y: i32) -> Option<usize> {
     settings_swatches(window)
         .iter()
         .position(|swatch| swatch.contains(x, y))
+}
+
+struct DisplayControls {
+    display_y: i32,
+    presets: [Rect; 4],
+    custom: Rect,
+    apply: Rect,
+    refresh: Rect,
+}
+
+fn display_controls(window: &Window) -> DisplayControls {
+    let x = window.x + 16;
+    let y = window.y + TITLEBAR_H as i32 + 14;
+    let card_w = window.w.saturating_sub(32);
+    let label_x = x + 14;
+    let max_x = x + card_w as i32 - 14;
+    let display_y = y + 152;
+
+    let gap = 6usize;
+    let available = (max_x - label_x).max(0) as usize;
+    let button_w = available.saturating_sub(gap * 3) / 4;
+    let mut presets = [Rect::new(0, 0, 0, 0); 4];
+    for (index, preset) in presets.iter_mut().enumerate() {
+        *preset = Rect::new(
+            label_x + (index * (button_w + gap)) as i32,
+            display_y + 84,
+            button_w.max(30),
+            26,
+        );
+    }
+
+    let apply_w = 64usize;
+    let apply_x = max_x - apply_w as i32;
+    let field_x = label_x + 78;
+    let field_w = (apply_x - 8 - field_x).max(40) as usize;
+    let custom = Rect::new(field_x, display_y + 120, field_w, 24);
+    let apply = Rect::new(apply_x, display_y + 120, apply_w, 24);
+    let refresh = Rect::new(
+        label_x,
+        display_y + 154,
+        (max_x - label_x).max(0) as usize,
+        22,
+    );
+
+    DisplayControls {
+        display_y,
+        presets,
+        custom,
+        apply,
+        refresh,
+    }
+}
+
+fn display_control_at(window: &Window, x: i32, y: i32) -> Option<Hit> {
+    let controls = display_controls(window);
+    for (index, preset) in controls.presets.iter().enumerate() {
+        if preset.contains(x, y) {
+            return Some(Hit::DisplayPreset(index));
+        }
+    }
+    if controls.custom.contains(x, y) {
+        return Some(Hit::DisplayCustom);
+    }
+    if controls.apply.contains(x, y) {
+        return Some(Hit::DisplayApply);
+    }
+    if controls.refresh.contains(x, y) {
+        return Some(Hit::DisplayRefresh);
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -2566,8 +3104,57 @@ fn glow(
     }
 }
 
-fn build_wallpaper(width: usize, height: usize) -> Vec<u32> {
-    let mut buffer = vec![0u32; width.saturating_mul(height)];
+fn draw_button(
+    frame: &mut [u32],
+    stride: usize,
+    height: usize,
+    rect: &Rect,
+    label: &str,
+    selected: bool,
+    hovered: bool,
+    accent: u32,
+) {
+    let (fill_color, border, text_color) = if selected {
+        (accent, FG, FG)
+    } else if hovered {
+        (MENU_TILE_HOVER, accent, FG)
+    } else {
+        (MENU_TILE, CARD_LINE, FG)
+    };
+    rounded_rect(
+        frame, stride, height, rect.x, rect.y, rect.w, rect.h, 7, border,
+    );
+    rounded_rect(
+        frame,
+        stride,
+        height,
+        rect.x + 1,
+        rect.y + 1,
+        rect.w.saturating_sub(2),
+        rect.h.saturating_sub(2),
+        6,
+        fill_color,
+    );
+    let text_width = label.len() as i32 * COL_PITCH as i32;
+    let text_x = rect.x + (rect.w as i32 - text_width) / 2;
+    draw_text(
+        frame,
+        stride,
+        height,
+        text_x.max(rect.x + 6),
+        rect.y + 4,
+        rect.x + rect.w as i32 - 4,
+        label,
+        text_color,
+    );
+}
+
+fn fill_wallpaper(buffer: &mut [u32], width: usize, height: usize) {
+    let pixels = width.saturating_mul(height);
+    if width == 0 || height == 0 || buffer.len() < pixels {
+        return;
+    }
+    let buffer = &mut buffer[..pixels];
     for y in 0..height {
         let color = mix(WALL_TOP, WALL_BOTTOM, y, height.max(1));
         let row = &mut buffer[y * width..(y + 1) * width];
@@ -2580,7 +3167,7 @@ fn build_wallpaper(width: usize, height: usize) -> Vec<u32> {
     // Safe graphics mode keeps the plain gradient to stay light on old GPUs.
     if !safe_mode() {
         glow(
-            &mut buffer,
+            buffer,
             width,
             height,
             (width as i64 * 32) / 100,
@@ -2590,7 +3177,7 @@ fn build_wallpaper(width: usize, height: usize) -> Vec<u32> {
             34,
         );
         glow(
-            &mut buffer,
+            buffer,
             width,
             height,
             (width as i64 * 76) / 100,
@@ -2607,7 +3194,7 @@ fn build_wallpaper(width: usize, height: usize) -> Vec<u32> {
     let mark = (height / 5).clamp(120, 260);
     if width > mark + 48 && height > mark + 48 {
         logo::draw_dim(
-            &mut buffer,
+            buffer,
             width,
             height,
             (width - mark - 36) as i32,
@@ -2617,8 +3204,7 @@ fn build_wallpaper(width: usize, height: usize) -> Vec<u32> {
         );
     }
 
-    dither(&mut buffer, width, height);
-    buffer
+    dither(buffer, width, height);
 }
 
 /// Ordered 4x4 dithering: a ±1 LSB perturbation breaks up gradient banding

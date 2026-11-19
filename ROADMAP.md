@@ -47,7 +47,8 @@ are built and tested.
 
 ## Phase 4: User Interface (Partially completed)
 ### Milestone 4.1: Graphical environment
-- [x] Limine VBE/GOP framebuffer at 1024×768×32
+- [x] Limine VBE/GOP framebuffer, boot presets and custom boot resolution
+- [x] Live resolution switching in Settings on QEMU/VirtualBox Bochs VBE
 - [x] Software compositor with a cached wallpaper and full-screen RAM frame
 - [x] Window manager: focus/raise, drag, resize, minimise, maximise/restore, close
 - [x] Taskbar with Start button, pinned apps, running indicators and live clock
@@ -55,6 +56,7 @@ are built and tested.
 - [x] Live accent colours in Settings
 - [ ] Alt-Tab switcher, window snapping, animations
 - [ ] HiDPI scaling and multi-monitor support
+- [ ] Native physical-GPU mode setting and monitor refresh-rate control
 
 ### Milestone 4.2: Applications
 - [x] Kernel-side terminal shell with real command parsing

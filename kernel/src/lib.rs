@@ -11,7 +11,9 @@ extern crate alloc;
 pub mod acpi;
 pub mod allocator;
 pub mod ata;
+pub mod browser_bridge;
 pub mod diagnostics;
+pub mod display;
 pub mod e1000;
 pub mod font;
 pub mod framebuffer;
@@ -113,6 +115,7 @@ pub extern "C" fn kernel_main() -> ! {
         framebuffer::splash_step("Detecting hardware...", 58);
     }
     pci::scan();
+    display::init();
     e1000::init();
     net::init(e1000::mac());
     usb::detect();
@@ -137,6 +140,7 @@ pub extern "C" fn kernel_main() -> ! {
     }
 
     wm::set_safe_mode(mode == limine::BootMode::Safe);
+    browser_bridge::init();
     wm::init();
     framebuffer::splash_step("Starting desktop...", 100);
     // Hold the finished splash briefly so the boot screen is actually seen.

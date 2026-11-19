@@ -68,14 +68,16 @@ syscall-driven process model. The boot-time shell is a kernel task. See
 
 ## Is there a GPU driver?
 
-No. Graphics come from Limine's VBE/GOP framebuffer and all composition is
-software. `nvidia.rs` only detects GPUs and reads boot registers. There is a
-window manager, but it is CPU-drawn, not GPU-accelerated. See
-[Graphics](Graphics.md).
+No native GPU driver. Graphics come from Limine's VBE/GOP framebuffer and all
+composition is software. On QEMU standard VGA and VirtualBox VBE, Settings can
+change resolution live through the Bochs VBE interface. Physical GPUs still use
+the boot-time mode; `nvidia.rs` only detects GPUs and reads boot registers.
+There is a window manager, but it is CPU-drawn, not GPU-accelerated. See
+[Display Settings](Display-Settings.md) and [Graphics](Graphics.md).
 
 ## What is the current test status?
 
-`cargo build --workspace` is clean and `cargo test --workspace` reports 26 tests
-/ 40 suites / 0 failures. The BIOS image, UEFI image and ISO reach the graphical
+`cargo build --workspace` is clean and `cargo test --workspace` reports 31 tests
+/ 42 suites / 0 failures. The BIOS image, UEFI image and ISO reach the graphical
 desktop; the direct PVH load reaches the text shell. See
 [Status](Status.md) and [Release Notes](Release-Notes.md).

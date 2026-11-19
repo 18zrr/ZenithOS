@@ -243,6 +243,19 @@ pub fn available() -> bool {
     FRAMEBUFFER.lock().is_some()
 }
 
+/// Update the framebuffer geometry after a runtime mode change. The linear
+/// address does not move for the Bochs VBE adapters, but pitch and dimensions
+/// must follow the new mode. The next composite is forced to be a full frame.
+pub fn set_mode(width: usize, height: usize, pitch: usize) {
+    let mut framebuffer = FRAMEBUFFER.lock();
+    if let Some(fb) = framebuffer.as_mut() {
+        fb.width = width;
+        fb.height = height;
+        fb.pitch = pitch;
+    }
+    DISPLAY_CHANGED.store(true, Ordering::Release);
+}
+
 /// Return the framebuffer size in pixels, or `(0, 0)` when unavailable.
 pub fn dimensions() -> (usize, usize) {
     FRAMEBUFFER
@@ -720,7 +733,7 @@ fn recovery_paint_chrome(fb: &Framebuffer) {
     draw_text(fb, 22 + (28 - GLYPH_WIDTH) / 2, 19, "Z", RECOVERY_FG);
     draw_text(fb, 62, 17, "ZENITH OS", RECOVERY_FG);
     draw_text(fb, 62 + 10 * COL_PITCH, 17, " RECOVERY CONSOLE", RECOVERY_ACCENT);
-    let version = "v0.1.0";
+    let version = "v0.2.0";
     let version_x = fb.width.saturating_sub(22 + version.len() * COL_PITCH);
     draw_text(fb, version_x, 17, version, RECOVERY_MUTED);
 
@@ -1018,7 +1031,7 @@ pub fn splash_init() {
     centered_text(fb, bar_y - 34, "Starting Zenith OS...", SPLASH_MUTED);
 
     let footer_y = height.saturating_sub(32);
-    draw_text(fb, 22, footer_y, "Zenith OS 0.1.0", SPLASH_MUTED);
+    draw_text(fb, 22, footer_y, "Zenith OS 0.2.0", SPLASH_MUTED);
     let right = "Limine native";
     draw_text(
         fb,

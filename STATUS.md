@@ -3,13 +3,13 @@
 ## Verified working (this revision)
 
 - **Workspace**: `cargo build --workspace` is clean and
-  `cargo test --workspace` reports **26 tests / 40 suites / 0 failures**.
+  `cargo test --workspace` reports **31 tests / 42 suites / 0 failures**.
 - **Boot paths**:
   - QEMU PVH direct load: `cd kernel && make qemu` reaches the interactive text
     shell. This path has no linear framebuffer, so it stays text-only.
   - Limine BIOS image: `./build_image.sh` produces `zenith.img` (MBR + FAT16,
     `limine-bios.sys`, `limine.conf`, native Limine kernel). Verified to reach
-    the graphical desktop and log `[wm] compositor 1024x768, mouse=1`; a USB HID
+    the graphical desktop and log `[wm] compositor 1280x800, mouse=1`; a USB HID
     mouse attached with `-usb -device usb-mouse` enumerates and drives the
     cursor.
   - Limine UEFI image: `./build_uefi_image.sh` produces `zenith-uefi.img` with an
@@ -20,15 +20,22 @@
   - Bootable ISO: `./build_iso.sh` produces the 16 MiB `zenith.iso`, verified to
     reach the graphical desktop with USB HID mouse input.
 - **Desktop and window manager** (`kernel/src/wm.rs`):
-  - Software compositor: cached gradient wallpaper, full-screen RAM frame
-    (about 6 MiB at 1024×768) blitted to the framebuffer; dirty-only redraws
-    capped at roughly 50 Hz.
+  - Software compositor: cached gradient wallpaper and three preallocated
+    full-screen surfaces (about 95 MiB at 4K) blitted to the framebuffer;
+    dirty-only redraws capped at roughly 100 Hz.
+  - Display settings: live resolution switching on QEMU standard VGA and
+    VirtualBox VBE through Bochs VBE, with 720p/1080p/1440p/4K presets and a
+    custom `WIDTHxHEIGHT` field. The previous mode is restored if a request is
+    rejected. Physical-GPU mode setting and monitor-Hz control are not
+    implemented.
   - Text: antialiased 10×20 DejaVu Sans Mono glyphs alpha-blended into the
     compositor and shared by the terminal and all window-manager text.
   - Window manager: focus/raise on click, title-bar dragging, bottom-right
     resize grip, minimise, maximise/restore, close, rounded corners, drop
     shadows and per-app title icons.
-  - Built-in windows: Terminal, System Monitor, Settings and About.
+  - Built-in windows: Terminal, System Monitor, Settings, About and Browser.
+    Browser uses a host Chromium companion through `tools/run_browser.py`;
+    JavaScript interaction and HTTPS navigation were verified in QEMU.
   - Taskbar: centred Start button, four pinned app icons with running/focused
     indicators and hover feedback, link-status indicator, and a CMOS real-time
     clock that repaints when the minute changes without input.
@@ -108,11 +115,13 @@
 - FAT32, NTFS and ext4 are read-only. Zenith FS has no directory permissions
   and only single-indirect blocks. NTFS resolves paths by scanning the MFT
   rather than parsing $INDEX trees.
-- Framebuffer graphics are provided by Limine (VBE/GOP); there is no native GPU
-  driver and all compositing is software at 1024×768 with no HiDPI scaling,
-  multi-monitor support, window snapping or Alt-Tab switcher. `nvidia.rs`
-  detects NVIDIA GPUs and reads boot registers only — GSP firmware, engine
-  programming and mode setting are not implemented.
+- Framebuffer graphics are provided by Limine (VBE/GOP). Live resolution
+  switching is limited to Bochs VBE adapters (QEMU/VirtualBox); physical PCs
+  use the boot-time mode. There is no native GPU driver and all compositing is
+  software with no HiDPI scaling, multi-monitor support, window snapping or
+  Alt-Tab switcher. Monitor refresh rate remains host/firmware-controlled.
+  `nvidia.rs` detects NVIDIA GPUs and reads boot registers only — GSP firmware,
+  engine programming and mode setting are not implemented.
 - The graphical desktop requires a Limine framebuffer; the direct PVH path is
   text-only.
 - Userland apps run as host harnesses, not OS processes; no syscall-using apps.

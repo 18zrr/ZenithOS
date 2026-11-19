@@ -187,6 +187,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
         "help" => {
             diagnostics::println("Available commands:");
             diagnostics::println("  help      show this list");
+            diagnostics::println("  browser   open the Chromium companion");
             diagnostics::println("  sysinfo   system overview");
             diagnostics::println("  pci       list PCI devices");
             diagnostics::println("  mem       memory summary");
@@ -200,20 +201,24 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
             diagnostics::println("  uptime    seconds since boot");
             diagnostics::println("  clear     clear the screen");
             diagnostics::println("  flip      change display orientation");
+            diagnostics::println("  display   show or set WIDTHxHEIGHT");
+            diagnostics::println("  pointer   mouse cursor position");
             diagnostics::println("  install   graphical installation wizard");
             diagnostics::println("F1 opens the Start menu; F12 changes display orientation.");
         }
+        "browser" => crate::wm::open_browser(),
         "sysinfo" => {
-            diagnostics::println("Zenith OS v0.1.0 - system overview");
+            diagnostics::println("Zenith OS v0.2.0 - system overview");
             diagnostics::puts("boot: ");
             diagnostics::println(if crate::limine::is_active() { "Limine native" } else { "PVH direct" });
-            if let Some(fb) = crate::limine::framebuffer() {
+            let (width, height) = crate::framebuffer::dimensions();
+            if width != 0 && height != 0 {
                 diagnostics::puts("display: ");
-                diagnostics::put_dec(fb.width);
+                diagnostics::put_dec(width as u64);
                 diagnostics::puts("x");
-                diagnostics::put_dec(fb.height);
-                diagnostics::puts("x");
-                diagnostics::put_dec(fb.bpp as u64);
+                diagnostics::put_dec(height as u64);
+                diagnostics::puts("x32  ");
+                diagnostics::puts(crate::display::backend_name());
                 diagnostics::puts("\n");
             }
             let (regions, usable) = crate::limine::memory_summary();
@@ -320,7 +325,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
                 }
             }
         }
-        "version" => diagnostics::println("Zenith OS v0.1.0 (x86_64, Limine)"),
+        "version" => diagnostics::println("Zenith OS v0.2.0 (x86_64, Limine)"),
         "about" => {
             diagnostics::println("Zenith OS - an independent x86_64 operating");
             diagnostics::println("system written in Rust and assembly.");
@@ -337,6 +342,44 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
         }
         "clear" => diagnostics::clear_screen(),
         "flip" => crate::framebuffer::cycle_orientation(),
+        "display" => match args {
+            Some(text) => match crate::display::parse(text) {
+                Some((width, height)) => match crate::wm::apply_display(width, height) {
+                    Ok(()) => {
+                        diagnostics::puts("[display] applied ");
+                        diagnostics::put_dec(width as u64);
+                        diagnostics::puts("x");
+                        diagnostics::put_dec(height as u64);
+                        diagnostics::puts("\n");
+                    }
+                    Err(message) => {
+                        diagnostics::puts("[display] ");
+                        diagnostics::println(message);
+                    }
+                },
+                None => diagnostics::println("usage: display WIDTHxHEIGHT (for example 1920x1080)"),
+            },
+            None => {
+                let (width, height) = crate::framebuffer::dimensions();
+                diagnostics::puts("display: ");
+                diagnostics::put_dec(width as u64);
+                diagnostics::puts("x");
+                diagnostics::put_dec(height as u64);
+                diagnostics::puts(" backend=");
+                diagnostics::puts(crate::display::backend_name());
+                diagnostics::puts("\n");
+                diagnostics::println("refresh: controlled by the host display, not the guest");
+                diagnostics::println("physical GPUs need a native display driver (not implemented)");
+            }
+        },
+        "pointer" => {
+            let (x, y) = crate::mouse::position();
+            diagnostics::puts("pointer: ");
+            diagnostics::put_dec(x.max(0) as u64);
+            diagnostics::puts(",");
+            diagnostics::put_dec(y.max(0) as u64);
+            diagnostics::puts("\n");
+        }
         "install" => {
             crate::mouse::flush_events();
             crate::installer::run();
@@ -355,7 +398,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
 fn shell_task() {
     const CAPACITY: usize = 16;
 
-    diagnostics::println("Zenith OS v0.1.0 - interactive shell");
+    diagnostics::println("Zenith OS v0.2.0 - interactive shell");
     diagnostics::println("Type 'help' for available commands.");
     diagnostics::puts("zenith> ");
 
@@ -370,9 +413,16 @@ fn shell_task() {
         crate::usb::poll();
 
         // Mouse events drive the window manager.
-        if crate::wm::pump() == crate::wm::Action::Installer {
-            run_installer();
-            continue;
+        match crate::wm::pump() {
+            crate::wm::Action::Installer => {
+                run_installer();
+                continue;
+            }
+            crate::wm::Action::DisplayMode(width, height) => {
+                let _ = crate::wm::apply_display(width, height);
+                continue;
+            }
+            crate::wm::Action::None => {}
         }
 
         while let Some(event) = keyboard::take_event() {
@@ -397,6 +447,37 @@ fn shell_task() {
                     run_installer();
                 }
                 continue;
+            }
+
+            if crate::wm::browser_key(event) {
+                continue;
+            }
+
+            // The Settings custom-resolution field owns typing while active.
+            if crate::wm::settings_input_active() {
+                if let Some(action) = crate::wm::settings_key(event) {
+                    if let crate::wm::Action::DisplayMode(width, height) = action {
+                        let _ = crate::wm::apply_display(width, height);
+                    }
+                }
+                continue;
+            }
+
+            // Typing anywhere on the desktop brings the terminal forward,
+            // instead of silently disappearing when Settings or another
+            // window has focus.
+            let edits_terminal = matches!(
+                event.key,
+                keyboard::Key::Char(_)
+                    | keyboard::Key::Backspace
+                    | keyboard::Key::Enter
+                    | keyboard::Key::Up
+                    | keyboard::Key::Down
+                    | keyboard::Key::PageUp
+                    | keyboard::Key::PageDown
+            );
+            if edits_terminal && !crate::wm::terminal_focused() {
+                crate::wm::focus_terminal();
             }
 
             // Typing belongs to the terminal only while it has focus.
@@ -434,7 +515,7 @@ fn shell_task() {
                 keyboard::Key::PageUp => crate::framebuffer::scroll_lines(10),
                 keyboard::Key::PageDown => crate::framebuffer::scroll_lines(-10),
                 keyboard::Key::Enter => {
-                    diagnostics::putc(b'\n');
+                    diagnostics::puts("\n");
                     if length > 0 {
                         let command = core::str::from_utf8(&line[..length]).unwrap_or("");
                         let slot = if history_len < CAPACITY {
@@ -472,7 +553,7 @@ fn shell_task() {
                     if length + 1 < line.len() {
                         line[length] = other;
                         length += 1;
-                        diagnostics::putc(other);
+                        diagnostics::console_putc(other);
                     }
                 }
                 _ => {}

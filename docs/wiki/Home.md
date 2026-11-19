@@ -27,6 +27,7 @@ Limine BIOS, UEFI and ISO paths. Details are in [Status](Status.md) and
 - [Drivers](Drivers.md) — PCI, ATA, ACPI, e1000, USB, NVIDIA probing.
 - [Filesystems](Filesystems.md) — Zenith FS, FAT32, NTFS, ext4, VFS.
 - [Graphics](Graphics.md) — framebuffer desktop and consoles.
+- [Display Settings](Display-Settings.md) — live VM resolution, presets and refresh limits.
 - [Userland](Userland.md) — application libraries and host harnesses.
 - [Build System](Build-System.md) — workspace, scripts, and images.
 - [Troubleshooting](Troubleshooting.md) — common boot/display issues.

@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Welcome to Zenith Browser</title>
+<style>
+  :root { color-scheme: dark; font: 18px/1.5 system-ui; background: #111721; color: #eff5ff }
+  main { max-width: 35em; margin: 4em auto; padding: 1em }
+  button { padding: .5em 1em; font: inherit }
+</style>
+<main>
+  <h1>Zenith Browser</h1>
+  <p>Press <kbd>Ctrl+L</kbd> to enter a web address. Chromium runs on your Linux
+  host and uses its network connection. This browser profile lasts for this VM session.</p>
+  <button id="check">Test JavaScript</button>
+  <output id="result" aria-live="polite"></output>
+</main>
+<script>
+  let clicks = 0;
+  document.querySelector('#check').onclick = () => {
+    document.querySelector('#result').textContent = `JavaScript works: ${++clicks}`;
+  };
+</script>

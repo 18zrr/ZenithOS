@@ -1,7 +1,8 @@
 # Graphics
 
-See [Display settings](Display-Settings.md) for the new boot-resolution
-presets, custom-resolution configuration and monitor refresh-rate limitations.
+See [Display settings](Display-Settings.md) for live resolution switching in
+QEMU/VirtualBox, boot-resolution presets, custom modes and monitor
+refresh-rate limitations.
 
 Zenith OS graphics come from a **Limine-provided linear framebuffer** (VBE on
 BIOS, GOP on UEFI). There is no native GPU driver.
@@ -11,8 +12,10 @@ BIOS, GOP on UEFI). There is no native GPU driver.
 - The native Limine protocol requests a linear framebuffer tagged type
   `MB2_FRAMEBUFFER_TYPE_RGB`, parsed by `kernel/src/limine.rs` and
   `kernel/src/framebuffer.rs`.
-- Verified mode: **1024×768×32 bpp**, with pitch and address taken from the
-  bootloader tag.
+- Modes are requested by Limine at boot and can be changed live from Settings
+  on Bochs VBE adapters (QEMU standard VGA and VirtualBox VBE). Pitch and
+  address come from the bootloader tag; the Bochs backend updates dimensions
+  and pitch after a successful mode switch.
 - On the Limine path the kernel keeps Limine's page tables and HHDM rather than
   replacing CR3 (see [Memory Management](Memory-Management.md)).
 
@@ -110,7 +113,8 @@ See [Troubleshooting](Troubleshooting.md) for display problems.
 - No native GPU driver; `nvidia.rs` only detects devices and reads boot
   registers (no GSP firmware, engine programming, or mode setting). All
   compositing is done on the CPU.
-- Boot-selected software framebuffer with no live mode switching, HiDPI scaling, multi-monitor
+- Software framebuffer with live switching on Bochs VBE VMs, no physical-GPU
+  mode setting, no HiDPI scaling, no multi-monitor
   support, window snapping, Alt-Tab switcher, or animations.
 - Mouse input works over PS/2 and USB HID. USB support is UHCI only: EHCI/xHCI,
   hotplug, USB keyboards and multiple HID devices are not supported.

@@ -32,7 +32,7 @@ fn render_sidebar(step: usize, width: usize, height: usize) {
     fb::fill_rect(0, 0, width, 48, PANEL);
     fb::fill_rect(0, 0, width, 4, ACCENT);
     fb::text(24, 16, "Zenith OS Installer", FG);
-    fb::text(width - 96, 16, "v0.1.0", MUTED);
+    fb::text(width - 96, 16, "v0.2.0", MUTED);
 
     fb::fill_rect(0, 48, 256, height - 104, 0x00121C2C);
     for (index, name) in STEP_NAMES.iter().enumerate() {
@@ -73,7 +73,7 @@ fn render(step: usize, selection: usize, progress: usize, result: Option<bool>) 
         0 => {
             fb::text(x, y, "Welcome to Zenith OS", FG);
             y += 40;
-            fb::text(x, y, "This wizard will install Zenith OS v0.1.0", MUTED);
+            fb::text(x, y, "This wizard will install Zenith OS v0.2.0", MUTED);
             y += 24;
             fb::text(x, y, "on your computer.", MUTED);
             y += 56;

@@ -27,7 +27,7 @@ cached gradient wallpaper, windows, the taskbar and the mouse cursor are
 composed into a full-screen RAM buffer and then blitted to the framebuffer, so
 redraws do not flicker.
 
-- **Windows**: Terminal, System Monitor, Settings and About. Every window has a
+- **Windows**: Terminal, System Monitor, Settings, About and Browser. Every window has a
   title bar, app icon, minimise / maximise / close controls, a drop shadow when
   floating, and a bottom-right resize grip.
 - **Mouse**: PS/2 mouse on IRQ12 and a USB HID boot-protocol mouse on UHCI.
@@ -42,13 +42,40 @@ redraws do not flicker.
 - **Start menu**: click Start or press **F1**. Type to filter apps, use the
   arrow keys to move, **Enter** to launch and **Esc** to close; clicking outside
   the panel also closes it. The Installer entry opens the graphical wizard.
-- **Keyboard focus**: the terminal receives typing only while it is the active
-  window; the Start menu owns the keyboard while it is open. **F12** still
-  cycles display orientation.
+- **Keyboard focus**: the Start menu, active Browser window and Settings
+  resolution field receive their own input. Otherwise typing brings the
+  Terminal forward. **F12** cycles display orientation.
 
 The `zenith-ui` crate provides a host-side software `Surface` and Fluent-style
 theme used by tests and demos; the live desktop is drawn by the kernel's own
 window manager (`kernel/src/wm.rs`).
+
+### Browse the web in QEMU (Linux x86-64 host)
+
+```sh
+./build_iso.sh
+python3 tools/run_browser.py
+```
+
+Choose **Start → Browser**, or type `browser` in Terminal. Use **Ctrl+L**
+to enter a URL. The window shows a live Chromium-family browser, including
+its address bar and tabs. JavaScript, layout, DNS and HTTPS run on the host.
+The guest exchanges pixels and input with it over a local QEMU shared-memory
+device. Booting the ISO alone, including on a physical PC, does not start a
+browser engine.
+
+The launcher requires QEMU, Chromium (or `--chromium /path/to/executable`),
+Python 3 with `python-xlib`, Xvfb with `xvfb-run`, `xauth`, and Bubblewrap
+with user namespaces enabled. Use a regular desktop Linux package under
+`/usr` or `/opt`. The browser has a private display and a temporary profile;
+history, cookies and downloads disappear when the VM session ends. Its
+960×600 view scales with the guest window. Audio, camera, host clipboard
+and guest file transfers are not integrated.
+
+To check the entire path offline, install Pillow and run
+`python3 tools/test_browser.py`. The test uses guest keyboard input to open a
+loopback page, clicks a button, and checks the resulting JavaScript-driven
+color change in a QEMU screenshot.
 
 ## Graphical boot and installer
 
@@ -70,6 +97,7 @@ available commands:
 
 ```
 help      show this list
+browser   open the Chromium companion window
 sysinfo   system overview (boot mode, display, memory, MAC/link)
 pci       list PCI devices
 mem       memory summary
@@ -83,6 +111,8 @@ echo      print text
 uptime    seconds since boot
 clear     clear the screen
 flip      change display orientation
+display   show or set WIDTHxHEIGHT (Bochs VBE VMs)
+pointer   mouse cursor position
 ```
 
 The shell supports line editing (Backspace), command history (Up/Down arrows),
@@ -92,7 +122,7 @@ implemented subsystems — nothing is simulated.
 ## Current status (verified)
 
 - `cargo build --workspace` is clean and `cargo test --workspace` reports
-  **26 tests / 40 suites / 0 failures**.
+  **31 tests / 42 suites / 0 failures**.
 - Boots four ways: QEMU PVH direct load, Limine BIOS disk image, Limine UEFI
   image + OVMF, and the bootable ISO. The graphical desktop was boot-verified on
   the Limine BIOS, UEFI and ISO paths; PVH direct load reaches the text shell
@@ -118,12 +148,13 @@ implemented subsystems — nothing is simulated.
   UEFI or ISO). QEMU's direct PVH/multiboot load has no framebuffer and stays
   text-only.
 - USB support is UHCI only; QEMU's PIIX3 companion controller is the tested
-  host. EHCI/xHCI are not initialised, there is no hotplug or USB keyboard
-  support, and only one HID boot-protocol mouse is handled.
-- Compositing is software-only at 1024×768 (controlled by
-  `boot/limine-native.conf`), capped at roughly 50 Hz. There is no GPU
-  acceleration, HiDPI scaling, multi-monitor support, window snapping or
-  Alt-Tab switcher.
+  host. EHCI/xHCI are not initialised, there is no hotplug, and only one HID
+  boot-protocol keyboard and mouse are handled.
+- Compositing is software-only, capped at roughly 100 Hz. Resolution can be
+  changed live in Settings on QEMU/VirtualBox Bochs VBE adapters; physical PCs
+  use the boot-time Limine mode. There is no native GPU mode setting, monitor
+  Hz control, HiDPI scaling, multi-monitor support, window snapping or Alt-Tab
+  switcher.
 - UEFI boot was verified with **512 MiB** of guest RAM. With 128 MiB the Limine
   loader itself runs out of high memory before the kernel starts.
 - e1000 RX path is written but unvalidated; no live DHCP/UDP/TCP exchange.
