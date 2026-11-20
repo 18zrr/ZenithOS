@@ -54,7 +54,7 @@ The boot menu still offers resolution presets as a boot-time fallback:
 
 | Entry | Requested framebuffer mode |
 | --- | --- |
-| Zenith OS | 1280×800, or your configured custom default |
+| Zenith OS | 1920×1080 (Full HD), or your configured custom default |
 | Safe graphics | 800×600 |
 | Text recovery console | 1024×768 |
 | 720p | 1280×720 |
