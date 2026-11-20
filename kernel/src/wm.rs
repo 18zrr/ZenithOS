@@ -2349,7 +2349,7 @@ impl Wm {
         );
         let y = top + 78;
         draw_text_centered(frame, stride, height, center, y, "ZENITH OS", self.accent);
-        draw_text_centered(frame, stride, height, center, y + 26, "Version 0.2.0", FG);
+        draw_text_centered(frame, stride, height, center, y + 26, "Version 0.3.0", FG);
         draw_text_centered(
             frame,
             stride,

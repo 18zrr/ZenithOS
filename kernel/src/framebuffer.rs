@@ -732,7 +732,7 @@ fn recovery_paint_chrome(fb: &Framebuffer) {
     draw_splash_mark(fb, 20, 9, 36);
     draw_text(fb, 62, 17, "ZENITH OS", RECOVERY_FG);
     draw_text(fb, 62 + 10 * COL_PITCH, 17, " RECOVERY CONSOLE", RECOVERY_ACCENT);
-    let version = "v0.2.0";
+    let version = "v0.3.0";
     let version_x = fb.width.saturating_sub(22 + version.len() * COL_PITCH);
     draw_text(fb, version_x, 17, version, RECOVERY_MUTED);
 
@@ -1032,7 +1032,7 @@ pub fn splash_init() {
     centered_text(fb, bar_y - 34, "Starting Zenith OS...", SPLASH_MUTED);
 
     let footer_y = height.saturating_sub(32);
-    draw_text(fb, 22, footer_y, "Zenith OS 0.2.0", SPLASH_MUTED);
+    draw_text(fb, 22, footer_y, "Zenith OS 0.3.0", SPLASH_MUTED);
     let right = "Limine native";
     draw_text(
         fb,

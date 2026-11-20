@@ -208,7 +208,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
         }
         "browser" => crate::wm::open_browser(),
         "sysinfo" => {
-            diagnostics::println("Zenith OS v0.2.0 - system overview");
+            diagnostics::println("Zenith OS v0.3.0 - system overview");
             diagnostics::puts("boot: ");
             diagnostics::println(if crate::limine::is_active() { "Limine native" } else { "PVH direct" });
             let (width, height) = crate::framebuffer::dimensions();
@@ -325,7 +325,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
                 }
             }
         }
-        "version" => diagnostics::println("Zenith OS v0.2.0 (x86_64, Limine)"),
+        "version" => diagnostics::println("Zenith OS v0.3.0 (x86_64, Limine)"),
         "about" => {
             diagnostics::println("Zenith OS - an independent x86_64 operating");
             diagnostics::println("system written in Rust and assembly.");
@@ -398,7 +398,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
 fn shell_task() {
     const CAPACITY: usize = 16;
 
-    diagnostics::println("Zenith OS v0.2.0 - interactive shell");
+    diagnostics::println("Zenith OS v0.3.0 - interactive shell");
     diagnostics::println("Type 'help' for available commands.");
     diagnostics::puts("zenith> ");
 
