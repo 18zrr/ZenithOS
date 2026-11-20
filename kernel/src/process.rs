@@ -1,5 +1,52 @@
 //! Process and thread management for Zenith OS kernel
 
+/// Opt-in boot-module loader check. Stage each loadable page into ordinary
+/// data memory. Never install a mapping or jump to module-supplied code.
+pub fn check_boot_images() {
+    use crate::diagnostics as log;
+    use zenith_elf::{Image, PAGE};
+
+    for index in 0..2 {
+        let Some(file) = crate::limine::module_bytes(index) else {
+            log::serial_puts("[elfcheck] missing module\n");
+            return;
+        };
+        let image = match Image::parse(file) {
+            Ok(image) => image,
+            Err(reason) => {
+                log::serial_puts("[elfcheck] rejected: ");
+                log::serial_puts(reason);
+                log::serial_puts("\n");
+                return;
+            }
+        };
+        // Bound work even for files declaring huge zero-filled segments.
+        let bytes: u64 = image.segments().map(|s| s.range().end - s.range().start).sum();
+        if bytes > 512 << 20 {
+            log::serial_puts("[elfcheck] image exceeds 512 MiB probe budget\n");
+            return;
+        }
+        let mut page = [0u8; PAGE];
+        let mut sum = 0u64;
+        for seg in image.segments() {
+            for addr in seg.range().step_by(PAGE) {
+                seg.load_page(addr, &mut page).unwrap();
+                sum += page.iter().map(|&b| b as u64).sum::<u64>();
+            }
+        }
+        log::serial_puts("[elfcheck] module=");
+        log::serial_put_dec(index as u64);
+        log::serial_puts(" pages=");
+        log::serial_put_dec(bytes / PAGE as u64);
+        log::serial_puts(" byte_sum=");
+        log::serial_put_dec(sum);
+        log::serial_puts(" interpreter=");
+        log::serial_puts(image.interpreter.unwrap_or("(none)"));
+        log::serial_puts("\n");
+    }
+    log::serial_puts("[elfcheck] complete (images not executed)\n");
+}
+
 /// Process state enumeration  
 #[derive(Debug, Clone, Copy)]
 pub enum ProcessState {

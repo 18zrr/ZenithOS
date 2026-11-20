@@ -1,12 +1,24 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Welcome to Zenith Browser</title>
 <style>
-  :root { color-scheme: dark; font: 18px/1.5 system-ui; background: #111721; color: #eff5ff }
-  main { max-width: 35em; margin: 4em auto; padding: 1em }
-  button { padding: .5em 1em; font: inherit }
+  :root { color-scheme: dark; font: 16px/1.55 system-ui, sans-serif; color: #f2f4ff; background: #121829 }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: radial-gradient(ellipse at 85% 95%, #41395f, transparent 60%) }
+  main { max-width: 33rem; margin: 1.5rem; padding: clamp(1.5rem, 6vw, 3rem);
+         background: #192033; border: 1px solid #444963; border-radius: 1.25rem }
+  small { color: #baaaff; letter-spacing: .13em; font-weight: 650 }
+  h1 { margin: .6rem 0; font-size: clamp(2rem, 5vw, 3rem); line-height: 1.1 }
+  p { color: #b3bed4 }
+  kbd { padding: .1em .4em; background: #252d45; border-radius: .25em; color: #f2f4ff }
+  button { margin: .5rem .6rem .5rem 0; padding: .55em 1em; font: inherit; font-weight: 600;
+           border: 0; border-radius: .55em; color: #121829; background: #baaaff; cursor: pointer }
+  button:focus-visible { outline: 2px solid #f2f4ff; outline-offset: 3px }
+  output { color: #85ddd0 }
 </style>
 <main>
+  <small>ZENITH &nbsp;/&nbsp; WORKSPACE</small>
   <h1>Zenith Browser</h1>
   <p>Press <kbd>Ctrl+L</kbd> to enter a web address. Chromium runs on your Linux
   host and uses its network connection. This browser profile lasts for this VM session.</p>

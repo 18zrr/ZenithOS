@@ -77,6 +77,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zenith-elf"
+version = "0.1.0"
+
+[[package]]
 name = "zenith-fs"
 version = "0.1.0"
 
@@ -88,8 +92,10 @@ version = "0.1.0"
 name = "zenith-kernel"
 version = "0.2.0"
 dependencies = [
+ "zenith-elf",
  "zenith-fs",
  "zenith-hid",
+ "zenith-ui",
 ]
 
 [[package]]

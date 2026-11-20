@@ -576,7 +576,9 @@ fn fill_rect_locked(fb: &Framebuffer, x: usize, y: usize, width: usize, height: 
 /// Draw a string at an arbitrary pixel position (used by desktop and installer).
 pub fn text(x: usize, y: usize, message: &str, color: u32) {
     if let Some(fb) = FRAMEBUFFER.lock().as_ref() {
-        draw_text(fb, x, y, message, color);
+        crate::ui_art::text(x as i32, y as i32, fb.width as i32, message, |px, py, a| {
+            if px >= 0 && py >= 0 { blend_pixel(fb, px as usize, py as usize, color, a); }
+        });
     }
 }
 
@@ -668,9 +670,9 @@ const RECOVERY_MAX_ROWS: usize = 40;
 const RECOVERY_HEADER: usize = 58;
 const RECOVERY_FOOTER: usize = 30;
 const RECOVERY_BG: u32 = 0x0007_0D16;
-const RECOVERY_FG: u32 = 0x00E6_EDF5;
-const RECOVERY_MUTED: u32 = 0x0080_90A4;
-const RECOVERY_ACCENT: u32 = 0x005A_A8F0;
+const RECOVERY_FG: u32 = zenith_ui::Theme::DARK.text;
+const RECOVERY_MUTED: u32 = zenith_ui::Theme::DARK.muted;
+const RECOVERY_ACCENT: u32 = zenith_ui::Theme::DARK.accent;
 
 struct RecoveryConsole {
     active: bool,
@@ -727,10 +729,7 @@ fn recovery_paint_chrome(fb: &Framebuffer) {
     fill_rect_locked(fb, 0, RECOVERY_HEADER - 3, fb.width, 2, RECOVERY_ACCENT);
     fill_rect_locked(fb, 0, RECOVERY_HEADER - 1, fb.width, 1, 0x0024_3B58);
 
-    // Logo tile with a stylised Z.
-    fill_rect_locked(fb, 22, 15, 28, 28, 0x0013_2A44);
-    fill_rect_locked(fb, 22, 15, 28, 2, RECOVERY_ACCENT);
-    draw_text(fb, 22 + (28 - GLYPH_WIDTH) / 2, 19, "Z", RECOVERY_FG);
+    draw_splash_mark(fb, 20, 9, 36);
     draw_text(fb, 62, 17, "ZENITH OS", RECOVERY_FG);
     draw_text(fb, 62 + 10 * COL_PITCH, 17, " RECOVERY CONSOLE", RECOVERY_ACCENT);
     let version = "v0.2.0";
@@ -744,7 +743,9 @@ fn recovery_paint_chrome(fb: &Framebuffer) {
         fb,
         22,
         footer_y + 6,
-        "Type help for commands  |  F12 rotates the display  |  reboot for the desktop",
+        if fb.width >= 830 {
+            "Type help for commands  |  F12 rotates the display  |  reboot for the desktop"
+        } else { "help: commands   F12: rotate   reboot: desktop" },
         RECOVERY_MUTED,
     );
 }
@@ -909,12 +910,12 @@ pub fn recovery_start() {
 
 // ---- Boot splash ---------------------------------------------------------
 
-const SPLASH_TOP: u32 = 0x0004_0710;
-const SPLASH_BOTTOM: u32 = 0x000A_1424;
-const SPLASH_FG: u32 = 0x00F5_F2FF;
-const SPLASH_MUTED: u32 = 0x008A_87AA;
-const SPLASH_ACCENT: u32 = 0x008A_6CFF;
-const SPLASH_TRACK: u32 = 0x0015_1E2E;
+const SPLASH_TOP: u32 = zenith_ui::Theme::DARK.window;
+const SPLASH_BOTTOM: u32 = zenith_ui::Theme::DARK.wallpaper_bottom;
+const SPLASH_FG: u32 = zenith_ui::Theme::DARK.text;
+const SPLASH_MUTED: u32 = zenith_ui::Theme::DARK.muted;
+const SPLASH_ACCENT: u32 = zenith_ui::Theme::DARK.accent;
+const SPLASH_TRACK: u32 = 0x004E_4865;
 
 fn fill_round_rect_locked(
     fb: &Framebuffer,

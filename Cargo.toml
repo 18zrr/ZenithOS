@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "kernel",
+    "kernel/elf",
     "drivers",
     "drivers/acpi",
     "drivers/pci",

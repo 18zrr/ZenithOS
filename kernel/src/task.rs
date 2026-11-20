@@ -452,6 +452,9 @@ fn shell_task() {
             if crate::wm::browser_key(event) {
                 continue;
             }
+            if crate::wm::scroll_key(event.key) {
+                continue;
+            }
 
             // The Settings custom-resolution field owns typing while active.
             if crate::wm::settings_input_active() {

@@ -16,7 +16,9 @@ use alloc::vec::Vec;
 
 use crate::display;
 use crate::browser_bridge as browser;
-use crate::font::{blend, COL_PITCH, FONT, GLYPH_HEIGHT, GLYPH_WIDTH, ROW_PITCH};
+use crate::font::{blend, COL_PITCH, GLYPH_HEIGHT, ROW_PITCH};
+use crate::ui_art;
+use zenith_ui::Theme;
 use crate::framebuffer as fb;
 use crate::keyboard::{Key, KeyEvent};
 use crate::logo;
@@ -41,19 +43,19 @@ const TASKBAR_H: usize = 80;
 const DOCK_H: usize = 64;
 const DOCK_MARGIN: usize = 8;
 
-const WALL_TOP: u32 = 0x0006_0C18;
-const WALL_BOTTOM: u32 = 0x0014_2742;
-const WINDOW_BG: u32 = 0x0011_1721;
+const WALL_TOP: u32 = Theme::DARK.wallpaper_top;
+const WALL_BOTTOM: u32 = Theme::DARK.wallpaper_bottom;
+const WINDOW_BG: u32 = Theme::DARK.window;
 const TERM_BG: u32 = 0x0008_0D16;
 const TERM_LINE: u32 = 0x0023_3042;
-const TITLE_ACTIVE: u32 = 0x001C_2635;
+const TITLE_ACTIVE: u32 = Theme::DARK.title_bar;
 const TITLE_IDLE: u32 = 0x0015_1D29;
 const BORDER_ACTIVE: u32 = 0x0046_5E7C;
 const BORDER_IDLE: u32 = 0x0026_313F;
-const TASKBAR_BG: u32 = 0x0017_212E;
+const TASKBAR_BG: u32 = Theme::DARK.taskbar;
 const TASKBAR_LINE: u32 = 0x0038_4A60;
 const TASKBAR_HOVER: u32 = 0x0028_3648;
-const MENU_BG: u32 = 0x0017_202C;
+const MENU_BG: u32 = Theme::DARK.taskbar;
 const MENU_BORDER: u32 = 0x0039_4C62;
 const MENU_TILE: u32 = 0x001E_2836;
 const MENU_TILE_HOVER: u32 = 0x002B_3849;
@@ -61,16 +63,16 @@ const MENU_TILE_SELECTED: u32 = 0x0032_4A66;
 const SEARCH_BG: u32 = 0x0011_1923;
 const CARD_BG: u32 = 0x0018_2130;
 const CARD_LINE: u32 = 0x0028_3546;
-const FG: u32 = 0x00F5_F7FA;
-const MUTED: u32 = 0x009A_A7B8;
-const DIM: u32 = 0x006B_778A;
+const FG: u32 = Theme::DARK.text;
+const MUTED: u32 = Theme::DARK.muted;
+const DIM: u32 = 0x0095_A2BC;
 const CLOSE_HOVER: u32 = 0x00E8_1111;
 const SHADOW: u32 = 0x0002_060C;
 const STATUS_OK: u32 = 0x0055_C08A;
 const STATUS_WARN: u32 = 0x00E0_A030;
 
-const ACCENTS: [u32; 4] = [0x0000_78D4, 0x0003_8387, 0x0087_64B8, 0x00CA_5010];
-const ACCENT_NAMES: [&str; 4] = ["Azure", "Teal", "Violet", "Amber"];
+const ACCENTS: [u32; 4] = [Theme::DARK.accent, 0x0085_DDD0, 0x008D_BDFF, 0x00FF_BA8C];
+const ACCENT_NAMES: [&str; 4] = ["Lilac", "Mint", "Sky", "Apricot"];
 
 static DIRTY: AtomicBool = AtomicBool::new(false);
 static SAFE_MODE: AtomicBool = AtomicBool::new(false);
@@ -99,23 +101,13 @@ impl WindowKind {
         }
     }
 
-    fn color(self) -> u32 {
+    fn icon(self) -> usize {
         match self {
-            WindowKind::Browser => 0x0025_83BB,
-            WindowKind::Terminal => 0x0000_78D4,
-            WindowKind::Monitor => 0x004E_96C2,
-            WindowKind::Settings => 0x0071_BA78,
-            WindowKind::About => 0x008A_4A9E,
-        }
-    }
-
-    fn letter(self) -> u8 {
-        match self {
-            WindowKind::Browser => b'B',
-            WindowKind::Terminal => b'T',
-            WindowKind::Monitor => b'M',
-            WindowKind::Settings => b'S',
-            WindowKind::About => b'A',
+            WindowKind::Terminal => 0,
+            WindowKind::Monitor => 1,
+            WindowKind::Settings => 2,
+            WindowKind::About => 3,
+            WindowKind::Browser => 5,
         }
     }
 }
@@ -137,6 +129,21 @@ struct Window {
     minimized: bool,
     maximized: bool,
     restore: (i32, i32, usize, usize),
+    scroll: usize,
+}
+
+impl Window {
+    fn max_scroll(self) -> usize {
+        let content: usize = match self.kind {
+            WindowKind::Settings => 14 + 152 + DISPLAY_CARD_H + 10 + 116 + 12,
+            WindowKind::Monitor => 14 + 126 + 146 + 116 + 12,
+            WindowKind::About => 12 + 78 + 82 + 3*24 + 20 + 12,
+            _ => 0,
+        };
+        content.saturating_sub(self.h.saturating_sub(TITLEBAR_H + 2))
+    }
+
+    fn offset(self) -> i32 { self.scroll.min(self.max_scroll()) as i32 }
 }
 
 #[derive(Clone, Copy)]
@@ -322,24 +329,24 @@ fn rounded_rect(
     // measured against the corner circle, then the colour is blended by the
     // fraction of the pixel that falls inside the shape. Integer square roots
     // keep the kernel free of floating-point support.
-    for (corner_x, corner_y) in [
-        (x, y),
-        (x + (w - r) as i32, y),
-        (x, y + (h - r) as i32),
-        (x + (w - r) as i32, y + (h - r) as i32),
+    for (corner_x, corner_y, right, bottom) in [
+        (x, y, false, false),
+        (x + (w - r) as i32, y, true, false),
+        (x, y + (h - r) as i32, false, true),
+        (x + (w - r) as i32, y + (h - r) as i32, true, true),
     ] {
         for dy in 0..r {
             let py = corner_y + dy as i32;
             if py < 0 || py as usize >= height {
                 continue;
             }
-            let fy = (2 * r) as i64 - 2 * dy as i64 - 1;
+            let fy = (2 * if bottom { dy } else { r - 1 - dy } + 1) as i64;
             for dx in 0..r {
                 let px = corner_x + dx as i32;
                 if px < 0 || px as usize >= stride {
                     continue;
                 }
-                let fx = (2 * r) as i64 - 2 * dx as i64 - 1;
+                let fx = (2 * if right { dx } else { r - 1 - dx } + 1) as i64;
                 let distance = isqrt(((fx * fx + fy * fy) as u64) << 8) as i64;
                 let alpha = ((((2 * r as i64 + 1) * 16) - distance) * 255 / 32)
                     .clamp(0, 255) as u8;
@@ -357,35 +364,7 @@ fn rounded_rect(
     }
 }
 
-/// Blend a solid colour into a clipped rectangle.
-fn blend_rect(
-    frame: &mut [u32],
-    stride: usize,
-    height: usize,
-    x: i32,
-    y: i32,
-    w: usize,
-    h: usize,
-    color: u32,
-    alpha: u8,
-) {
-    if w == 0 || h == 0 || alpha == 0 {
-        return;
-    }
-    let x0 = x.max(0) as usize;
-    let y0 = y.max(0) as usize;
-    let x1 = ((x as i64 + w as i64).clamp(0, stride as i64)) as usize;
-    let y1 = ((y as i64 + h as i64).clamp(0, height as i64)) as usize;
-    for row in y0..y1 {
-        let start = row * stride;
-        for column in x0..x1 {
-            frame[start + column] = blend(frame[start + column], color, alpha);
-        }
-    }
-}
-
-/// Soft drop shadow built from translucent edge bands, so the cost stays
-/// proportional to the window perimeter rather than its area.
+/// Feather the rounded silhouette, skipping pixels that the window will cover.
 fn soft_shadow(
     frame: &mut [u32],
     stride: usize,
@@ -395,14 +374,25 @@ fn soft_shadow(
     w: usize,
     h: usize,
 ) {
-    const SHADOW_COLOR: u32 = SHADOW;
-    for (spread, alpha) in [(12i32, 22u8), (6, 34u8)] {
-        let left = x + 4 - spread;
-        let right = x + 4 + w as i32;
-        blend_rect(frame, stride, height, left, y + 10, spread as usize, h, SHADOW_COLOR, alpha);
-        blend_rect(frame, stride, height, right, y + 10, spread as usize, h, SHADOW_COLOR, alpha);
-        blend_rect(frame, stride, height, x + 10, y + 6 - spread, w.saturating_sub(10), spread as usize, SHADOW_COLOR, alpha);
-        blend_rect(frame, stride, height, x + 10, y + 6 + h as i32, w.saturating_sub(10), spread as usize, SHADOW_COLOR, alpha);
+    let right = x + w as i32;
+    let bottom = y + h as i32;
+    let outer = (x-14).max(0)..(right+14).min(stride as i32);
+    for py in (y-8).max(0)..(bottom+20).min(height as i32) {
+        let dy = (y+18-py).max(py-(bottom-6)).max(0);
+        let mut shade = |px: i32| {
+            let dx = (x+12-px).max(px-(right-12)).max(0);
+            let a = (676 - dx*dx - dy*dy).clamp(0, 532) * 64 / 532;
+            if a != 0 {
+                let i = py as usize * stride + px as usize;
+                frame[i] = blend(frame[i], SHADOW, a as u8);
+            }
+        };
+        if py >= y && py < bottom {
+            for px in outer.start..(x+12).min(outer.end) { shade(px); }
+            for px in (right-12).max(outer.start)..outer.end { shade(px); }
+        } else {
+            for px in outer.clone() { shade(px); }
+        }
     }
 }
 
@@ -430,32 +420,18 @@ fn put(frame: &mut [u32], stride: usize, height: usize, x: i32, y: i32, color: u
     }
 }
 
-fn draw_glyph(
-    frame: &mut [u32],
-    stride: usize,
-    height: usize,
-    x: i32,
-    y: i32,
-    byte: u8,
-    color: u32,
-) {
-    let glyph = &FONT[(byte as usize) & 0x7F];
-    for row in 0..GLYPH_HEIGHT {
-        let py = y + row as i32;
-        if py < 0 || py as usize >= height {
-            continue;
-        }
-        for column in 0..GLYPH_WIDTH {
-            let alpha = glyph[row][column];
-            if alpha == 0 {
-                continue;
+fn app_icon(frame: &mut [u32], stride: usize, height: usize, x: i32, y: i32, size: usize, app: usize) {
+    let tint = start_menu::APPS[app].1;
+    rounded_rect(frame, stride, height, x, y, size, size, size / 4, blend(WINDOW_BG, tint, 95));
+    rounded_rect(frame, stride, height, x+1, y+1, size-2, size-2, size / 4, blend(WINDOW_BG, tint, 36));
+    for row in 0..size {
+        for col in 0..size {
+            let (px, py) = (x + col as i32, y + row as i32);
+            if px >= 0 && py >= 0 && (px as usize) < stride && (py as usize) < height {
+                let a = ui_art::ICONS[app*1024 + row*32/size*32 + col*32/size];
+                let i = py as usize * stride + px as usize;
+                frame[i] = blend(frame[i], tint, a);
             }
-            let px = x + column as i32;
-            if px < 0 || px as usize >= stride {
-                continue;
-            }
-            let offset = py as usize * stride + px as usize;
-            frame[offset] = blend(frame[offset], color, alpha);
         }
     }
 }
@@ -470,13 +446,12 @@ fn draw_text(
     text: &str,
     color: u32,
 ) {
-    for (index, byte) in text.bytes().enumerate() {
-        let glyph_x = x + index as i32 * COL_PITCH as i32;
-        if glyph_x + COL_PITCH as i32 > max_x {
-            break;
+    ui_art::text(x, y, max_x, text, |px, py, a| {
+        if px >= 0 && py >= 0 && (px as usize) < stride && (py as usize) < height {
+            let i = py as usize * stride + px as usize;
+            frame[i] = blend(frame[i], color, a);
         }
-        draw_glyph(frame, stride, height, glyph_x, y, byte, color);
-    }
+    });
 }
 
 fn draw_text_centered(
@@ -488,7 +463,7 @@ fn draw_text_centered(
     text: &str,
     color: u32,
 ) {
-    let width = text.len() as i32 * COL_PITCH as i32;
+    let width = ui_art::text_width(text);
     draw_text(
         frame,
         stride,
@@ -683,6 +658,9 @@ pub fn render_now() {
     if !initialized() {
         return;
     }
+    // A modal framebuffer client or the splash may have replaced every pixel
+    // without touching the compositor's previous-frame cache.
+    WM.lock().presented.clear();
     render();
 }
 
@@ -1013,6 +991,20 @@ pub fn browser_key(event: KeyEvent) -> bool {
     }
 }
 
+/// Page through settings or system details that do not fit a short window.
+pub fn scroll_key(key: Key) -> bool {
+    if !matches!(key, Key::PageUp | Key::PageDown) { return false; }
+    let mut wm = WM.lock();
+    let Some(i) = wm.top_visible() else { return false };
+    let w = wm.windows[i].as_mut().unwrap();
+    if w.max_scroll() == 0 { return false; }
+    let page = (w.h - TITLEBAR_H - 24) as i32;
+    w.scroll = (w.offset() + if key == Key::PageDown {page} else {-page})
+        .clamp(0, w.max_scroll() as i32) as usize;
+    invalidate();
+    true
+}
+
 /// Drain queued mouse events and update the desktop. Runs in the shell task.
 pub fn pump() -> Action {
     let mut wm = WM.lock();
@@ -1039,9 +1031,16 @@ pub fn pump() -> Action {
                 }
             }
             mouse::EVENT_WHEEL => {
-                if wm.terminal_at(event.x, event.y) {
-                    fb::scroll_lines(event.scroll * 3);
-                    invalidate();
+                if !start_menu::is_open() {
+                    if let Some(i) = wm.window_at(event.x,event.y) {
+                        let w = wm.windows[i].as_mut().unwrap();
+                        if w.kind == WindowKind::Terminal {
+                            fb::scroll_lines(event.scroll * 3);
+                        } else {
+                            w.scroll = (w.offset()-event.scroll*42).clamp(0,w.max_scroll() as i32) as usize;
+                        }
+                        invalidate();
+                    }
                 }
             }
             _ => {}
@@ -1259,6 +1258,7 @@ impl Wm {
             minimized: false,
             maximized: false,
             restore: (x, y, w, h),
+            scroll: 0,
         }
     }
 
@@ -1454,13 +1454,6 @@ impl Wm {
             }
             Hit::Body(index) => {
                 self.focus_index(index);
-                if let Some(window) = self.windows[index] {
-                    if window.kind == WindowKind::Settings {
-                        if let Some(swatch) = settings_swatch_at(&window, x, y) {
-                            self.accent = ACCENTS[swatch.min(ACCENTS.len() - 1)];
-                        }
-                    }
-                }
                 invalidate();
             }
             Hit::Swatch(swatch) => {
@@ -1517,20 +1510,10 @@ impl Wm {
         }
     }
 
-    /// Whether the point lies inside a visible terminal window.
-    fn terminal_at(&self, x: i32, y: i32) -> bool {
-        for position in 0..self.order_len {
-            let index = self.order[position];
-            if let Some(window) = self.windows[index] {
-                if !window.minimized
-                    && window.kind == WindowKind::Terminal
-                    && window_contains(&window, x, y)
-                {
-                    return true;
-                }
-            }
-        }
-        false
+    fn window_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.order[..self.order_len].iter().rev().copied().find(|&i| {
+            self.windows[i].is_some_and(|w| !w.minimized && window_contains(&w,x,y))
+        })
     }
 
     fn launch(&mut self, app: usize) -> Action {
@@ -1601,6 +1584,7 @@ impl Wm {
                 return Hit::Resize(index);
             }
             if window.kind == WindowKind::Settings {
+                let y = y + window.offset();
                 if let Some(swatch) = settings_swatch_at(&window, x, y) {
                     return Hit::Swatch(swatch);
                 }
@@ -1714,16 +1698,7 @@ impl Wm {
         // App icon and title.
         let icon_x = x + 12;
         let icon_y = y + (TITLEBAR_H as i32 - 22) / 2;
-        rounded_rect(frame, stride, height, icon_x, icon_y, 22, 22, 6, window.kind.color());
-        draw_glyph(
-            frame,
-            stride,
-            height,
-            icon_x + (22 - GLYPH_WIDTH as i32) / 2,
-            icon_y + (22 - GLYPH_HEIGHT as i32) / 2,
-            window.kind.letter(),
-            0x00FF_FFFF,
-        );
+        app_icon(frame, stride, height, icon_x, icon_y, 22, window.kind.icon());
         let title_color = if active { FG } else { MUTED };
         draw_text(
             frame,
@@ -1807,9 +1782,25 @@ impl Wm {
                 }
             }
             WindowKind::Terminal => self.draw_terminal(frame, window, active),
-            WindowKind::Monitor => self.draw_monitor(frame, window),
-            WindowKind::Settings => self.draw_settings(frame, window, mouse_x, mouse_y),
-            WindowKind::About => self.draw_about(frame, window),
+            WindowKind::Monitor | WindowKind::Settings | WindowKind::About => {
+                let top = (y + TITLEBAR_H as i32).clamp(0,height as i32);
+                let bottom = (y + h as i32 - 2).clamp(top,height as i32);
+                let body = &mut frame[top as usize*stride..bottom as usize*stride];
+                let local = Window { y: y-top-window.offset(), ..*window };
+                match window.kind {
+                    WindowKind::Monitor => self.draw_monitor(body,&local),
+                    WindowKind::Settings => self.draw_settings(body,&local,mouse_x,mouse_y-top),
+                    _ => self.draw_about(body,&local),
+                }
+                let max = window.max_scroll();
+                if max > 0 {
+                    let track = h - TITLEBAR_H - 16;
+                    let thumb = (track*track/(track+max)).max(16);
+                    let pos = window.offset() as usize * (track-thumb) / max;
+                    rounded_rect(frame,stride,height,x+w as i32-8,y+(TITLEBAR_H+8+pos) as i32,
+                                 3,thumb,1,DIM);
+                }
+            }
         }
 
         // Resize grip in the bottom-right corner.
@@ -1945,7 +1936,7 @@ impl Wm {
         title: &str,
     ) {
         let stride = self.width;
-        let height = self.height;
+        let height = frame.len() / stride;
         rounded_rect(frame, stride, height, x, y, w, h, 12, CARD_LINE);
         rounded_rect(
             frame,
@@ -1973,7 +1964,7 @@ impl Wm {
 
     fn draw_monitor(&self, frame: &mut [u32], window: &Window) {
         let stride = self.width;
-        let height = self.height;
+        let height = frame.len() / stride;
         let x = window.x + 16;
         let y = window.y + TITLEBAR_H as i32 + 14;
         let card_w = window.w.saturating_sub(32);
@@ -2071,13 +2062,15 @@ impl Wm {
         label: &str,
         value: &str,
     ) {
-        draw_text(frame, self.width, self.height, x, y, max_x, label, MUTED);
-        draw_text(frame, self.width, self.height, x + 230, y, max_x, value, FG);
+        let height = frame.len() / self.width;
+        let split = x + ((max_x-x)*2/5).min(230);
+        draw_text(frame, self.width, height, x, y, split-8, label, MUTED);
+        draw_text(frame, self.width, height, split, y, max_x, value, FG);
     }
 
     fn draw_settings(&self, frame: &mut [u32], window: &Window, mouse_x: i32, mouse_y: i32) {
         let stride = self.width;
-        let height = self.height;
+        let height = frame.len() / stride;
         let x = window.x + 16;
         let y = window.y + TITLEBAR_H as i32 + 14;
         let card_w = window.w.saturating_sub(32);
@@ -2086,7 +2079,7 @@ impl Wm {
 
         // Appearance card.
         self.card(frame, x, y, card_w, 142, "Appearance");
-        self.monitor_row(frame, label_x, y + 42, max_x, "Theme", "Fluent Dark");
+        self.monitor_row(frame, label_x, y + 42, max_x, "Theme", "Afterglow Dark");
 
         let accent_index = ACCENTS
             .iter()
@@ -2339,7 +2332,7 @@ impl Wm {
 
     fn draw_about(&self, frame: &mut [u32], window: &Window) {
         let stride = self.width;
-        let height = self.height;
+        let height = frame.len() / stride;
         let center = window.x + window.w as i32 / 2;
         let x = window.x + 24;
         let top = window.y + TITLEBAR_H as i32 + 12;
@@ -2487,26 +2480,14 @@ impl Wm {
                     TASKBAR_HOVER,
                 );
             }
-            rounded_rect(
-                frame,
-                stride,
-                height,
-                rect.x + 9,
-                rect.y + 7,
-                34,
-                34,
-                9,
-                kind.color(),
-            );
-            draw_glyph(
-                frame,
-                stride,
-                height,
-                rect.x + 9 + (34 - GLYPH_WIDTH as i32) / 2,
-                rect.y + 7 + (34 - GLYPH_HEIGHT as i32) / 2,
-                kind.letter(),
-                0x00FF_FFFF,
-            );
+            app_icon(frame, stride, height, rect.x+8, rect.y+5, 36, kind.icon());
+            if hovered && !start_menu::is_open() {
+                let label = kind.title();
+                let w = ui_art::text_width(label) as usize + 20;
+                let left = rect.x + (52 - w as i32)/2;
+                rounded_rect(frame, stride, height, left, panel.y-32, w, 26, 8, TASKBAR_BG);
+                draw_text(frame, stride, height, left+10, panel.y-29, left+w as i32, label, FG);
+            }
 
             if let Some(window) = self.find(*kind).and_then(|index| self.windows[index]) {
                 let focused = self.top_visible() == self.find(*kind);
@@ -2620,7 +2601,7 @@ impl Wm {
             panel.x + 56,
             panel.y + 18,
             panel.right(),
-            "Start",
+            "Applications",
             FG,
         );
         draw_text(
@@ -2746,7 +2727,7 @@ impl Wm {
             panel.x + 24,
             panel.y + 108,
             panel.right(),
-            "Pinned",
+            "Installed apps",
             MUTED,
         );
 
@@ -2786,33 +2767,16 @@ impl Wm {
                 8,
                 background,
             );
-            let (_, color) = start_menu::APPS[app];
-            rounded_rect(
-                frame,
-                stride,
-                height,
-                rect.x + 14,
-                rect.y + 17,
-                30,
-                30,
-                7,
-                color,
-            );
-            draw_glyph(
-                frame,
-                stride,
-                height,
-                rect.x + 14 + (30 - GLYPH_WIDTH as i32) / 2,
-                rect.y + 17 + (30 - GLYPH_HEIGHT as i32) / 2,
-                start_menu::APPS[app].0.as_bytes()[0],
-                0x00FF_FFFF,
-            );
+            app_icon(frame, stride, height, rect.x+14, rect.y+(rect.h as i32-32)/2, 32, app);
+            if entry == selected {
+                rounded_rect(frame, stride, height, rect.x, rect.y+(rect.h as i32-20)/2, 3, 20, 1, self.accent);
+            }
             draw_text(
                 frame,
                 stride,
                 height,
                 rect.x + 54,
-                rect.y + 23,
+                rect.y + (rect.h as i32 - 20)/2,
                 rect.right() - 8,
                 start_menu::APPS[app].0,
                 FG,
@@ -2923,7 +2887,7 @@ impl MenuLayout {
         let mut tiles = [Rect::new(0, 0, 0, 0); start_menu::APP_COUNT];
         let gap = 12usize;
         let tile_w = panel_w.saturating_sub(40 + gap) / 2;
-        let tile_h = 62usize;
+        let tile_h = 62.min(panel_h.saturating_sub(138 + 52 + 2*gap) / 3);
         for entry in 0..count {
             let column = entry % 2;
             let row = entry / 2;
@@ -3115,7 +3079,7 @@ fn draw_button(
     accent: u32,
 ) {
     let (fill_color, border, text_color) = if selected {
-        (accent, FG, FG)
+        (accent, accent, WINDOW_BG)
     } else if hovered {
         (MENU_TILE_HOVER, accent, FG)
     } else {
@@ -3135,7 +3099,7 @@ fn draw_button(
         6,
         fill_color,
     );
-    let text_width = label.len() as i32 * COL_PITCH as i32;
+    let text_width = ui_art::text_width(label);
     let text_x = rect.x + (rect.w as i32 - text_width) / 2;
     draw_text(
         frame,
@@ -3163,8 +3127,8 @@ fn fill_wallpaper(buffer: &mut [u32], width: usize, height: usize) {
         }
     }
 
-    // Soft blue and violet blooms, in the spirit of the Windows 11 wallpaper.
-    // Safe graphics mode keeps the plain gradient to stay light on old GPUs.
+    // The terrain is baked into the existing wallpaper surface once per mode.
+    // Each ridge interpolates a handful of normalized elevation samples.
     if !safe_mode() {
         glow(
             buffer,
@@ -3173,7 +3137,7 @@ fn fill_wallpaper(buffer: &mut [u32], width: usize, height: usize) {
             (width as i64 * 32) / 100,
             (height as i64 * 30) / 100,
             (height as i64 * 55) / 100,
-            0x003A_6EA8,
+            0x004D_678C,
             34,
         );
         glow(
@@ -3181,30 +3145,37 @@ fn fill_wallpaper(buffer: &mut [u32], width: usize, height: usize) {
             width,
             height,
             (width as i64 * 76) / 100,
-            (height as i64 * 72) / 100,
-            (height as i64 * 38) / 100,
-            0x005A_3A88,
-            22,
+            (height as i64 * 44) / 100,
+            (height as i64 * 65) / 100,
+            0x00A3_739B,
+            50,
         );
-    }
-
-    // A dim brand watermark in the lower-right corner. It sits behind the
-    // dock and window stack, so it reads as desktop texture rather than a
-    // competing foreground element.
-    let mark = (height / 5).clamp(120, 260);
-    if width > mark + 48 && height > mark + 48 {
-        logo::draw_dim(
-            buffer,
-            width,
-            height,
-            (width - mark - 36) as i32,
-            (height - mark - height / 6) as i32,
-            mark,
-            30,
-        );
+        // Backlit distant hills down to the dark foreground. Precompute a
+        // short vertical colour ramp per layer, not per pixel.
+        for (levels, rim, base) in [
+            ([65, 60, 66, 49, 39, 44], 0x008C_779F, 0x0046_4168),
+            ([55, 66, 74, 67, 52, 42], 0x0064_6A98, 0x0032_385A),
+            ([76, 69, 72, 82, 69, 58], 0x004B_5B82, 0x0024_304C),
+            ([84, 88, 84, 77, 80, 72], 0x0036_4660, 0x0018_243A),
+        ] {
+            let ramp: [u32; 64] = core::array::from_fn(|i| mix(rim, base, i, 63));
+            let fade = (height / 4).max(1);
+            for x in 0..width {
+                let phase = x * 5 * 256 / width;
+                let k = phase >> 8;
+                let t = phase & 255;
+                let eased = t*t*(768 - 2*t) >> 16;
+                let ridge = height * (levels[k]*(256-eased) + levels[k+1]*eased) / 25600;
+                for y in ridge..height {
+                    buffer[y*width+x] = ramp[((y-ridge)*63/fade).min(63)];
+                }
+            }
+        }
     }
 
     dither(buffer, width, height);
+    logo::draw(buffer, width, height, 22, 12, 32);
+    draw_text(buffer, width, height, 61, 18, width as i32, "Zenith  /  Workspace", FG);
 }
 
 /// Ordered 4x4 dithering: a ±1 LSB perturbation breaks up gradient banding

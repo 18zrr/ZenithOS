@@ -7,12 +7,13 @@
 
 use crate::{ata, framebuffer as fb, fs, keyboard, timer};
 
-const BG: u32 = 0x00101820;
-const PANEL: u32 = 0x00182430;
-const ACCENT: u32 = 0x00E17055;
-const BLUE: u32 = 0x002D8FB0;
-const FG: u32 = 0x00F0F4F8;
-const MUTED: u32 = 0x007A8A9A;
+use zenith_ui::Theme;
+const BG: u32 = Theme::DARK.window;
+const PANEL: u32 = Theme::DARK.taskbar;
+const ACCENT: u32 = Theme::DARK.accent;
+const BLUE: u32 = 0x003B_385A;
+const FG: u32 = Theme::DARK.text;
+const MUTED: u32 = Theme::DARK.muted;
 const SUCCESS: u32 = 0x0055C08A;
 const WARN: u32 = 0x00E0A030;
 
@@ -27,18 +28,25 @@ fn target_line() -> &'static str {
     }
 }
 
+fn sidebar_width(width: usize) -> usize {
+    (width / 4).min(230)
+}
+
 fn render_sidebar(step: usize, width: usize, height: usize) {
     fb::fill_rect(0, 0, width, height, BG);
     fb::fill_rect(0, 0, width, 48, PANEL);
-    fb::fill_rect(0, 0, width, 4, ACCENT);
-    fb::text(24, 16, "Zenith OS Installer", FG);
+    fb::fill_rect(24, 17, 3, 16, ACCENT);
+    fb::text(40, 14, "Zenith  /  System setup", FG);
     fb::text(width - 96, 16, "v0.2.0", MUTED);
 
-    fb::fill_rect(0, 48, 256, height - 104, 0x00121C2C);
+    let rail = sidebar_width(width);
+    fb::fill_rect(0, 48, rail, height.saturating_sub(104), PANEL);
+    fb::text(24, 68, "INSTALLATION", MUTED);
     for (index, name) in STEP_NAMES.iter().enumerate() {
-        let y = 88 + index * 40;
+        let y = 112 + index * 42;
         if index == step {
-            fb::fill_rect(0, y - 8, 256, 32, ACCENT);
+            fb::fill_rect(12, y - 7, rail.saturating_sub(24), 34, BLUE);
+            fb::fill_rect(12, y, 3, 20, ACCENT);
         }
         let number = match index {
             0 => "1",
@@ -47,8 +55,8 @@ fn render_sidebar(step: usize, width: usize, height: usize) {
             3 => "4",
             _ => "5",
         };
-        fb::text(24, y, number, FG);
-        fb::text(64, y, name, FG);
+        fb::text(28, y, number, if index < step { SUCCESS } else { ACCENT });
+        fb::text(54, y, name, if index == step { FG } else { MUTED });
     }
 }
 
@@ -66,7 +74,7 @@ fn render(step: usize, selection: usize, progress: usize, result: Option<bool>) 
     }
 
     render_sidebar(step, width, height);
-    let x = 296;
+    let x = sidebar_width(width) + 30;
     let mut y = 96;
 
     match step {
@@ -79,7 +87,7 @@ fn render(step: usize, selection: usize, progress: usize, result: Option<bool>) 
             y += 56;
             fb::text(x, y, "Language", FG);
             y += 32;
-            let label = "> English                         ";
+            let label = "English";
             fb::fill_rect(x - 8, y - 8, 320, 32, if selection == 0 { BLUE } else { PANEL });
             fb::text(x, y, label, FG);
         }
@@ -96,7 +104,7 @@ fn render(step: usize, selection: usize, progress: usize, result: Option<bool>) 
             fb::text(x, y, "FAT32 / NTFS / ext4 readers remain read-only.", MUTED);
             y += 56;
             let label = "> Erase partition and install Zenith OS";
-            fb::fill_rect(x - 8, y - 8, 600, 32, if selection == 0 { BLUE } else { PANEL });
+            fb::fill_rect(x - 8, y - 8, 600.min(width.saturating_sub(x+16)), 32, if selection == 0 { BLUE } else { PANEL });
             fb::text(x, y, label, FG);
         }
         2 => {

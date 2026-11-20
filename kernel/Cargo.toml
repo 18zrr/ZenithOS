@@ -6,7 +6,12 @@ edition = "2021"
 # src/main.rs is retained as documentation only and is not a build target.
 autobins = false
 
+[features]
+native-run = []
+
 [dependencies]
+zenith-ui = { path = "../gui/zenith-ui" }
+zenith-elf = { path = "elf" }
 zenith-fs = { path = "../filesystem/zenith-fs" }
 zenith-hid = { path = "../drivers/hid" }
 

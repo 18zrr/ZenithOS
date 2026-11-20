@@ -5,6 +5,7 @@ use core::ptr::read_unaligned;
 use crate::diagnostics;
 
 extern "C" {
+    static limine_module_request: [u64; 6];
     static limine_framebuffer_request: [u64; 6];
     static limine_rsdp_request: [u64; 6];
     static limine_memmap_request: [u64; 6];
@@ -12,6 +13,28 @@ extern "C" {
     static limine_kernel_address_request: [u64; 6];
     static limine_executable_cmdline_request: [u64; 6];
     static limine_cs: u16;
+}
+
+/// Data of a boot module (trusted Limine response, resident until explicitly reclaimed).
+pub fn module_bytes(index: usize) -> Option<&'static [u8]> {
+    #[repr(C)]
+    struct ModuleList {
+        revision: u64,
+        count: u64,
+        files: *const *const Module,
+    }
+    // Only the common prefix of limine_file is needed.
+    #[repr(C)]
+    struct Module {
+        revision: u64,
+        address: *const u8,
+        size: u64,
+    }
+    let modules: &ModuleList = unsafe { response(&limine_module_request) }?;
+    if index as u64 >= modules.count || modules.files.is_null() { return None; }
+    let file = unsafe { (*modules.files.add(index)).as_ref() }?;
+    if file.address.is_null() || file.size > isize::MAX as u64 { return None; }
+    Some(unsafe { core::slice::from_raw_parts(file.address, file.size as usize) })
 }
 
 #[repr(C)]

@@ -124,6 +124,8 @@ mb2_valid:    .long 0
 .global limine_hhdm_request
 .global limine_kernel_address_request
 .global limine_executable_cmdline_request
+.global limine_module_request
+limine_module_request: .quad 0,0,0,0,0,0,0,0
 limine_framebuffer_request: .quad 0,0,0,0,0,0
 limine_rsdp_request:        .quad 0,0,0,0,0,0
 limine_memmap_request:      .quad 0,0,0,0,0,0

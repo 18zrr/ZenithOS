@@ -21,10 +21,11 @@ BIOS, GOP on UEFI). There is no native GPU driver.
 
 ## Desktop
 
-The desktop is a Windows 11-inspired compositing environment implemented in
+The Afterglow desktop is a software compositing environment implemented in
 `kernel/src/wm.rs`.
 
-- **Compositor**: a gradient wallpaper is generated once and cached. On each
+- **Compositor**: a layered landscape is generated once per display mode and cached.
+  Safe graphics uses a simple gradient. On each
   redraw the wallpaper, every visible window, the taskbar, the Start menu and
   the mouse cursor are composed into a full-screen RAM buffer (about 6 MiB at
   1024×768×32 bpp), which is then blitted to the framebuffer in one pass. This
@@ -32,11 +33,14 @@ The desktop is a Windows 11-inspired compositing environment implemented in
 - **Dirty redraws**: a frame is only composed when something changed (input,
   focus, window state, menu state, caret blink or clock minute) and never more
    than 100 times per second. This is a software frame cap, not monitor Hz.
-- **Windows**: Terminal, System Monitor, Settings and About. Each has a title
-  bar with a per-app icon letter, minimise / maximise / close buttons, rounded
+- **Windows**: Terminal, System Monitor, Settings, About and Browser. Each has a title
+  bar with a pictogram, minimise / maximise / close buttons, rounded
   corners, a drop shadow while floating, and a bottom-right resize grip.
   Clicking a window focuses and raises it; dragging the title bar moves it;
   dragging the grip resizes it within the screen bounds.
+- **Typography**: desktop labels and the installer use proportional DejaVu Sans;
+  Terminal and recovery keep fixed-width text. Run `python3 tools/generate_ui_art.py`
+  with Pillow and DejaVu Sans installed to regenerate the embedded glyph and icon masks.
 - **Taskbar**: a centred Start button and pinned app icons with
   running/focused indicators and hover feedback, a link-status indicator, and
   a real-time clock read from CMOS. The clock asks for a repaint when the

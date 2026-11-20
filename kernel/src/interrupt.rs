@@ -235,6 +235,24 @@ pub extern "C" fn rust_interrupt_handler(frame: &mut InterruptFrame) {
     }
 }
 
+/// Hardware pushes the user stack and SS after RFLAGS on a privilege change.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct UserFrame {
+    pub regs: InterruptFrame,
+    pub sp: u64,
+    pub ss: u64,
+}
+
+#[no_mangle]
+pub extern "C" fn rust_user_interrupt_handler(frame: &mut UserFrame, _fx: &mut [u8;512]) {
+    #[cfg(feature = "native-run")]
+    if crate::native::trap(frame, _fx) {
+        return;
+    }
+    rust_interrupt_handler(&mut frame.regs);
+}
+
 /// Report an unexpected CPU exception with full register state, then halt.
 fn exception(frame: &InterruptFrame) {
     let vector = frame.vector as usize;

@@ -35,7 +35,7 @@ image:
 
 # Native Limine-protocol image (real linear framebuffer).
 image-limine:
-	@$(CARGO) build -p zenith-kernel --release
+	@$(CARGO) build -p zenith-kernel --release $(CARGO_BUILD_FLAGS)
 	@mkdir -p $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $(ARCH_DIR)/limine.s -o $(BUILD_DIR)/limine.o
 	$(AS) $(ASFLAGS) $(ARCH_DIR)/interrupts.s -o $(BUILD_DIR)/interrupts.o

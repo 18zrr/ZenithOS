@@ -96,8 +96,22 @@ isr_common:
     pushq %rax
 
     movq %rsp, %rdi
+    # User code may have set DF and may have live SIMD registers. Its
+    # privilege-transition frame comes from the aligned TSS ring-0 stack.
+    cld
+    testb $3, 144(%rsp)
+    jz .Lkernel_interrupt
+    subq $512, %rsp
+    fxsave64 (%rsp)
+    mov %rsp, %rsi
+    call rust_user_interrupt_handler
+    fxrstor64 (%rsp)
+    addq $512, %rsp
+    jmp .Lrestore_interrupt
+.Lkernel_interrupt:
     call rust_interrupt_handler
 
+.Lrestore_interrupt:
     popq %rax
     popq %rbx
     popq %rcx

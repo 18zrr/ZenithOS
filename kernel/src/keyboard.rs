@@ -247,6 +247,7 @@ fn scancode_key(code: u8, extended: bool, modifiers: Modifiers, num: bool) -> Op
     let shift = modifiers.shift();
     let caps = modifiers.caps;
     let key = match code {
+        0x01 => Key::Escape,
         0x02 => Key::Char(shifted(b'1', b'!', shift, caps, false)),
         0x03 => Key::Char(shifted(b'2', b'@', shift, caps, false)),
         0x04 => Key::Char(shifted(b'3', b'#', shift, caps, false)),

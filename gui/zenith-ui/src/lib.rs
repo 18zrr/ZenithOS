@@ -26,16 +26,16 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Fluent-style dark theme with a blue bloom and blue accent.
+    /// Afterglow: deep ink surfaces, cool moonlight text and a lilac accent.
     pub const DARK: Self = Self {
-        wallpaper_top: 0x000D1B33,
-        wallpaper_bottom: 0x001B3D66,
-        window: 0x001F1F1F,
-        title_bar: 0x002B2B2B,
-        taskbar: 0x00202020,
-        accent: 0x000078D4,
-        text: 0x00FFFFFF,
-        muted: 0x009A9A9A,
+        wallpaper_top: 0x00101930,
+        wallpaper_bottom: 0x0041395F,
+        window: 0x00121829,
+        title_bar: 0x00252D45,
+        taskbar: 0x00192033,
+        accent: 0x00BAAAFF,
+        text: 0x00F2F4FF,
+        muted: 0x00B3BED4,
     };
 }
 
@@ -490,9 +490,13 @@ mod tests {
     }
 
     #[test]
-    fn theme_has_fluent_palette() {
-        assert_eq!(Theme::DARK.accent, 0x000078D4);
-        assert_eq!(Theme::DARK.window, 0x001F1F1F);
+    fn muted_labels_remain_lighter_than_every_panel() {
+        let theme = Theme::DARK;
+        for surface in [theme.window, theme.title_bar, theme.taskbar] {
+            for shift in [0, 8, 16] {
+                assert!(((theme.muted >> shift) & 255u32) >= ((surface >> shift) & 255u32) + 96);
+            }
+        }
     }
 
     #[test]

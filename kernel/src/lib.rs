@@ -25,6 +25,8 @@ pub mod keyboard;
 pub mod limine;
 pub mod logo;
 pub mod memory;
+#[cfg(feature = "native-run")]
+mod native;
 pub mod net;
 pub mod nvidia;
 pub mod page_table;
@@ -37,6 +39,7 @@ pub mod sync;
 pub mod syscalls;
 pub mod task;
 pub mod timer;
+mod ui_art;
 pub mod usb;
 pub mod vga;
 pub mod wm;
@@ -97,9 +100,18 @@ pub extern "C" fn kernel_main() -> ! {
     memory::init_memory_management();
     paging::init_paging();
     process::init_process_manager();
+    if limine::cmdline().split_ascii_whitespace().any(|arg| arg == "elfcheck") {
+        process::check_boot_images();
+    }
 
     if mode != limine::BootMode::Recovery {
         framebuffer::splash_step("Setting up interrupts...", 32);
+    }
+    #[cfg(feature = "native-run")]
+    let native_run = limine::is_active() && limine::cmdline().split_ascii_whitespace().any(|s| s == "runelf");
+    #[cfg(feature = "native-run")]
+    if native_run {
+        native::init_segments();
     }
     interrupt::init();
     // The mouse is programmed with interrupts still masked, then IRQ12 is
@@ -127,6 +139,10 @@ pub extern "C" fn kernel_main() -> ! {
     acpi::init();
     ata::probe();
     syscalls::init();
+    #[cfg(feature = "native-run")]
+    if native_run {
+        native::boot();
+    }
 
     if mode == limine::BootMode::Recovery {
         // Keep COM1 as the complete boot log; the on-screen recovery console

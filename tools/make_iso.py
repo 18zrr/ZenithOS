@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build a BIOS-bootable ISO9660 image with Limine using pycdlib."""
+import os
 import sys
 
 import pycdlib
@@ -31,11 +32,12 @@ def build(output, files):
     iso.write(output)
     iso.close()
 
-    # SeaBIOS/ATAPI in QEMU fails to read small ISOs (< ~1 MiB). Pad the image
-    # to 16 MiB; the extra sectors are harmless and the Limine boot works.
+    # Supply spare trailing sectors for BIOS CD reads. Keep the usual 16 MiB
+    # desktop ISO; round larger module images UP, never truncate their data.
+    size = os.path.getsize(output)
     with open(output, "ab") as handle:
-        handle.truncate(16 * 1024 * 1024)
-    print(f"wrote {output} (padded to 16 MiB for SeaBIOS)")
+        handle.truncate(max(16 << 20, 1 << size.bit_length()))
+    print(f"wrote {output} ({os.path.getsize(output)} bytes)")
 
 
 if __name__ == "__main__":

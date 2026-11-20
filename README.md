@@ -22,10 +22,12 @@ All crates are members of one Cargo workspace rooted at `Cargo.toml`.
 
 ## Desktop
 
-The framebuffer desktop is a Windows 11-inspired compositing environment. A
-cached gradient wallpaper, windows, the taskbar and the mouse cursor are
+The framebuffer desktop uses the **Afterglow** dark theme. A cached landscape
+wallpaper, windows, the taskbar and the mouse cursor are
 composed into a full-screen RAM buffer and then blitted to the framebuffer, so
 redraws do not flicker.
+
+[Desktop preview: Afterglow in QEMU](docs/afterglow-desktop.png)
 
 - **Windows**: Terminal, System Monitor, Settings, About and Browser. Every window has a
   title bar, app icon, minimise / maximise / close controls, a drop shadow when
@@ -35,8 +37,9 @@ redraws do not flicker.
   raise a window, drag a title bar to move it, drag the corner grip to resize,
   use the taskbar to launch, restore or minimise apps, and change the accent
   colour from the Settings window. USB reports are polled from the shell loop.
-- **Text**: antialiased 10×20 monospaced glyphs, alpha-blended into the
-  composited frame and shared by the terminal and window manager.
+- **Text**: proportional DejaVu Sans labels for apps and setup, with a
+  10×20 monospaced grid for the Terminal and recovery console. Short Settings,
+  Monitor and About windows can be scrolled with the wheel or **PgUp/PgDn**.
 - **Taskbar**: centred Start button and pinned icons with running/focused
   indicators, a link-status indicator and the real-time clock read from CMOS.
 - **Start menu**: click Start or press **F1**. Type to filter apps, use the
@@ -46,8 +49,8 @@ redraws do not flicker.
   resolution field receive their own input. Otherwise typing brings the
   Terminal forward. **F12** cycles display orientation.
 
-The `zenith-ui` crate provides a host-side software `Surface` and Fluent-style
-theme used by tests and demos; the live desktop is drawn by the kernel's own
+The `zenith-ui` crate provides the shared Afterglow palette and a host-side
+software `Surface` for tests and demos; the live desktop is drawn by the kernel's own
 window manager (`kernel/src/wm.rs`).
 
 ### Browse the web in QEMU (Linux x86-64 host)
@@ -76,6 +79,9 @@ To check the entire path offline, install Pillow and run
 `python3 tools/test_browser.py`. The test uses guest keyboard input to open a
 loopback page, clicks a button, and checks the resulting JavaScript-driven
 color change in a QEMU screenshot.
+
+For progress toward Firefox running directly on the Zenith kernel, see the
+[native Firefox loader experiment](docs/native-firefox.md).
 
 ## Graphical boot and installer
 
