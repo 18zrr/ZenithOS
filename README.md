@@ -4,6 +4,14 @@ Zenith OS is an independent x86_64 operating system written in Rust, with
 assembly for the boot entry points. It uses a custom monolithic kernel, a
 custom filesystem (Zenith FS), and a custom graphical environment (Zenith UI).
 
+### New in v0.3.1
+
+Zenith FS now preserves the previous file if a replacement runs out of space,
+and reads correctly across fragmented and unaligned block boundaries. Saves
+write the new file and its extent tree to free blocks before committing the
+inode, so a replacement needs temporary free space for the new contents.
+The disk format is still Zenith FS v5. See the [release notes](RELEASE_NOTES.md).
+
 ## Layout
 
 ```
@@ -60,6 +68,13 @@ redraws do not flicker.
   copy a file in the same folder (`C`, up to 256 KiB), or delete (`Delete`).
   Enter the name and press **Enter**, or **Esc** to cancel. A non-empty folder
   must be emptied before deletion.
+- **Edit a note**: select a file and press **E** or click **Edit**. Type text,
+  press **Enter** for a newline, **Ctrl+S** to save, or **Esc** to discard.
+  The editor accepts printable ASCII and LF newlines, up to 4 KiB. A failed
+  save leaves the draft open. **F2** starts a rename with the old name filled
+  in; **Home**, **End**, **PgUp** and **PgDn** navigate directory listings.
+- **Switch windows**: **Alt+Tab** cycles through open windows, including
+  minimized ones. **Alt+Shift+Tab** cycles in reverse.
 - **Persistent preferences**: Settings saves accent, landscape/gradient wallpaper,
   and applied resolution to `desktop.prefs` on Zenith FS. Safe graphics skips
   the saved mode. Without a writable disk, changes last for the session only.
@@ -72,7 +87,10 @@ qemu-img create -f raw zenith-data.img 64M
 qemu-system-x86_64 -m 512 -boot d -cdrom zenith.iso \
   -drive file=zenith-data.img,format=raw,if=ide,index=0
 ```
-- **Keyboard focus**: the Start menu, active Browser window and Settings
+- First boot initializes Zenith FS only on a data disk with an empty boot
+  sector and a fully blank 16 MiB target region. An unreadable or unrecognized
+  region is left untouched.
+- **Keyboard focus**: the Start menu, active File Manager or Browser window and Settings
   resolution field receive their own input. Otherwise typing brings the
   Terminal forward. **F12** cycles display orientation.
 
@@ -154,8 +172,10 @@ implemented subsystems — nothing is simulated.
 
 ## Current status (verified)
 
-- `cargo build --workspace` is clean and `cargo test --workspace` reports
-  **31 tests / 42 suites / 0 failures**.
+- `cargo test --workspace --locked` runs the host-side regression suite.
+  To exercise file editing, window switching and persistence through a reboot,
+  build a fresh ISO and run `python3 tools/test_desktop_storage.py zenith.iso`.
+  The test creates its own temporary data disk.
 - Boots four ways: QEMU PVH direct load, Limine BIOS disk image, Limine UEFI
   image + OVMF, and the bootable ISO. The graphical desktop was boot-verified on
   the Limine BIOS, UEFI and ISO paths; PVH direct load reaches the text shell
@@ -181,13 +201,12 @@ implemented subsystems — nothing is simulated.
   UEFI or ISO). QEMU's direct PVH/multiboot load has no framebuffer and stays
   text-only.
 - USB support is UHCI only; QEMU's PIIX3 companion controller is the tested
-  host. EHCI/xHCI are not initialised, there is no hotplug, and only one HID
-  boot-protocol keyboard and mouse are handled.
+  host. The driver polls UHCI root ports for keyboard/mouse hotplug.
+  EHCI/xHCI controllers are not initialised.
 - Compositing is software-only, capped at roughly 100 Hz. Resolution can be
   changed live in Settings on QEMU/VirtualBox Bochs VBE adapters; physical PCs
   use the boot-time Limine mode. There is no native GPU mode setting, monitor
-  Hz control, HiDPI scaling, multi-monitor support, window snapping or Alt-Tab
-  switcher.
+  Hz control, HiDPI scaling, multi-monitor support or window snapping.
 - UEFI boot was verified with **512 MiB** of guest RAM. With 128 MiB the Limine
   loader itself runs out of high memory before the kernel starts.
 - e1000 RX path is written but unvalidated; no live DHCP/UDP/TCP exchange.

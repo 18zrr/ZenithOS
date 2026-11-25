@@ -117,6 +117,20 @@ unsafe fn outw(port: u16, value: u16) {
     core::arch::asm!("out dx, ax", in("dx") port, in("ax") value, options(nostack, preserves_flags));
 }
 
+/// Order journal phases on the primary master's write-back cache.
+pub fn flush_cache() -> Result<(), &'static str> {
+    unsafe {
+        if !wait_not_busy() { return Err("ATA busy timeout"); }
+        outb(DRIVE_HEAD, 0xE0);
+        outb(COMMAND, 0xE7); // FLUSH CACHE
+        for _ in 0..4 { inb(0x3F6); } // 400 ns before reading command status
+        if !wait_not_busy() || inb(STATUS) & (STATUS_ERR | 0x20) != 0 {
+            return Err("ATA cache flush failed");
+        }
+    }
+    Ok(())
+}
+
 #[inline]
 unsafe fn inw(port: u16) -> u16 {
     let value: u16;

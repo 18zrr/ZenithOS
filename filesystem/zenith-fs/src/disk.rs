@@ -1,4 +1,4 @@
-//! On-disk Zenith FS v4: extent-based addressing with 64-bit file sizes.
+//! On-disk Zenith FS v5: extent-based addressing with 64-bit file sizes.
 //!
 //! Extents allow arbitrarily large sparse files: a single extent maps a
 //! contiguous run of blocks with a 32-bit length, and index nodes extend the
@@ -39,6 +39,8 @@ pub trait BlockDevice {
     fn read_block(&mut self, block: usize, buffer: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError>;
     fn write_block(&mut self, block: usize, data: &[u8; BLOCK_SIZE]) -> Result<(), FsError>;
     fn block_count(&self) -> usize;
+    /// Make preceding writes durable. Write-through devices need no barrier.
+    fn sync(&mut self) -> Result<(), FsError> { Ok(()) }
 }
 
 #[repr(C)]
@@ -136,6 +138,7 @@ pub struct ZenithFs<B: BlockDevice> {
     allocated: Vec<bool>,
     journal_start: usize,
     transaction_id: u64,
+    needs_remount: bool,
     uid: u16,
     gid: u16,
 }
@@ -157,13 +160,17 @@ impl<B: BlockDevice> ZenithFs<B> {
         let usable = device.block_count() - JOURNAL_BLOCKS;
         let superblock = OnDiskSuperBlock {
             magic: MAGIC, version: VERSION, total_blocks: usable as u32,
-            free_blocks: (usable - DATA_START) as u32, root_inode: ROOT_INODE,
+            free_blocks: (usable - DATA_START - 1) as u32, root_inode: ROOT_INODE,
             block_size: BLOCK_SIZE as u32, reserved: [0; BLOCK_SIZE - 24],
         };
         let bytes = as_bytes(&superblock);
         let mut block = [0u8; BLOCK_SIZE];
         block[..bytes.len()].copy_from_slice(bytes);
         device.write_block(0, &block)?;
+        for table in 1..DATA_START {
+            device.write_block(table, &[0; BLOCK_SIZE])?;
+        }
+        device.write_block(usable, &[0; BLOCK_SIZE])?;
 
         let mut root = OnDiskInode::empty();
         root.number = ROOT_INODE;
@@ -175,7 +182,7 @@ impl<B: BlockDevice> ZenithFs<B> {
         write_root_extent(device, &mut root, &extent)?;
         Self::write_inode(device, ROOT_INODE, &root)?;
         device.write_block(DATA_START, &[0u8; BLOCK_SIZE])?;
-        Ok(())
+        device.sync()
     }
 
     /// Mount a formatted device, replaying any journal first.
@@ -193,7 +200,9 @@ impl<B: BlockDevice> ZenithFs<B> {
         let mut block = [0u8; BLOCK_SIZE];
         device.read_block(0, &mut block)?;
         let disk_super: OnDiskSuperBlock = unsafe { core::ptr::read_unaligned(block.as_ptr() as *const OnDiskSuperBlock) };
-        if disk_super.magic != MAGIC || disk_super.version != VERSION || disk_super.block_size as usize != BLOCK_SIZE {
+        if disk_super.magic != MAGIC || disk_super.version != VERSION || disk_super.block_size as usize != BLOCK_SIZE
+            || disk_super.total_blocks as usize <= DATA_START
+            || disk_super.total_blocks as usize > device.block_count().saturating_sub(JOURNAL_BLOCKS) {
             return Err(FsError::InvalidMagicNumber);
         }
 
@@ -220,10 +229,11 @@ impl<B: BlockDevice> ZenithFs<B> {
             allocated: Vec::new(),
             journal_start: disk_super.total_blocks as usize,
             transaction_id: 1,
+            needs_remount: false,
             uid: 0,
             gid: 0,
         };
-        fs.rebuild_allocated();
+        fs.rebuild_allocated()?;
         Ok(fs)
     }
 
@@ -241,6 +251,15 @@ impl<B: BlockDevice> ZenithFs<B> {
 
     /// Flush metadata to disk through the journal.
     pub fn flush(&mut self) -> Result<(), FsError> {
+        if self.needs_remount { return Err(FsError::IoError); }
+        let result = self.flush_inner();
+        // A device failure can happen on either side of the commit marker.
+        // Only journal replay can decide which generation is authoritative.
+        if result.is_err() { self.needs_remount = true; }
+        result
+    }
+
+    fn flush_inner(&mut self) -> Result<(), FsError> {
         let disk_super = OnDiskSuperBlock {
             magic: MAGIC, version: VERSION, total_blocks: self.superblock.total_blocks as u32,
             free_blocks: self.superblock.free_blocks as u32, root_inode: ROOT_INODE,
@@ -283,44 +302,112 @@ impl<B: BlockDevice> ZenithFs<B> {
         Err(FsError::DiskFull)
     }
 
-    fn rebuild_allocated(&mut self) {
-        let mut allocated = vec![false; self.superblock.total_blocks + JOURNAL_BLOCKS];
+    fn rebuild_allocated(&mut self) -> Result<(), FsError> {
+        let mut allocated = vec![false; self.superblock.total_blocks];
         for inode in self.inodes.iter().filter(|inode| inode.links != 0) {
             let root = inode.extent_root;
-            for_each_extent(&root, &mut self.device, &mut |visit| {
-                match visit {
-                    ExtentVisit::Leaf(extent) => {
-                        for block in extent.physical..extent.physical.saturating_add(extent.count as u64).min(allocated.len() as u64) {
-                            allocated[block as usize] = true;
-                        }
+            let mut logical_end = 0;
+            let valid = for_each_extent(&root, &mut self.device, &mut |visit| {
+                let (start, count) = match visit {
+                    ExtentVisit::Leaf(run) => {
+                        if run.count == 0 || run.logical < logical_end { return false; }
+                        let Some(end) = run.logical.checked_add(run.count) else { return false };
+                        logical_end = end;
+                        (run.physical, u64::from(run.count))
                     }
-                    ExtentVisit::Node(block) => {
-                        if (block as usize) < allocated.len() {
-                            allocated[block as usize] = true;
-                        }
-                    }
-                }
+                    ExtentVisit::Node(block) => (block, 1),
+                };
+                let Some(end) = start.checked_add(count) else { return false };
+                if start < DATA_START as u64 || end > allocated.len() as u64 { return false; }
+                let slice = &mut allocated[start as usize..end as usize];
+                if slice.contains(&true) { return false; }
+                slice.fill(true);
                 true
-            });
+            })?;
+            if !valid { return Err(FsError::IoError); }
         }
+        // Early v5 formatters counted the root directory's block as free.
+        self.superblock.free_blocks = allocated[DATA_START..].iter().filter(|&&used| !used).count();
         self.allocated = allocated;
+        Ok(())
+    }
+
+    // Data and new tree nodes are written to free blocks; directory changes
+    // are staged in the journal. No old data is overwritten before commit.
+    fn transaction<T>(&mut self, edit: impl FnOnce(&mut Self) -> Result<T, FsError>) -> Result<T, FsError> {
+        if self.needs_remount { return Err(FsError::IoError); }
+        let original = self.inodes;
+        let free = self.superblock.free_blocks;
+        match edit(self) {
+            Ok(value) => { self.flush()?; Ok(value) }
+            Err(err) => {
+                self.journal.discard();
+                self.inodes = original;
+                self.superblock.free_blocks = free;
+                if self.rebuild_allocated().is_err() { self.needs_remount = true; }
+                Err(err)
+            }
+        }
     }
 
     // ---- extent operations -------------------------------------------------
 
-    fn map_block(&mut self, inode: &OnDiskInode, logical: u32) -> Option<u64> {
+    fn release_block(&mut self, block: u64) {
+        self.allocated[block as usize] = false;
+        self.superblock.free_blocks += 1;
+    }
+
+    fn extents(&mut self, inode: &OnDiskInode) -> Result<(Vec<Extent>, Vec<u64>), FsError> {
+        let mut runs = Vec::new();
+        let mut nodes = Vec::new();
+        for_each_extent(&inode.extent_root, &mut self.device, &mut |entry| {
+            match entry {
+                ExtentVisit::Leaf(run) => runs.push(run),
+                ExtentVisit::Node(block) => nodes.push(block),
+            }
+            true
+        })?;
+        Ok((runs, nodes))
+    }
+
+    // Pack a complete new v5 tree bottom-up. Index blocks use the same
+    // allocator as file data and remain unreachable until the inode commits.
+    fn build_tree(&mut self, runs: &[Extent]) -> Result<[u8; EXTENT_ROOT_BYTES], FsError> {
+        let mut entries: Vec<(u32, [u8; EXTENT_ENTRY_SIZE])> = runs.iter()
+            .map(|run| (run.logical, as_bytes(run).try_into().unwrap())).collect();
+        let mut depth = 0;
+        let capacity = (BLOCK_SIZE - EXTENT_HEADER_SIZE) / EXTENT_ENTRY_SIZE;
+        while entries.len() > EXTENT_ENTRIES {
+            let mut parents = Vec::new();
+            for group in entries.chunks(capacity) {
+                let child = self.allocate_block()?;
+                let mut bytes = [0; BLOCK_SIZE];
+                pack_node(&mut bytes, depth, group);
+                self.device.write_block(child as usize, &bytes)?;
+                let index = ExtentIndex { logical: group[0].0, child: child as u64, reserved: 0 };
+                parents.push((group[0].0, as_bytes(&index).try_into().unwrap()));
+            }
+            entries = parents;
+            depth += 1;
+        }
+        let mut root = [0; EXTENT_ROOT_BYTES];
+        pack_node(&mut root, depth, &entries);
+        Ok(root)
+    }
+
+    fn map_block(&mut self, inode: &OnDiskInode, logical: u32) -> Result<Option<u64>, FsError> {
         let mut result = None;
         let root = inode.extent_root;
         for_each_extent(&root, &mut self.device, &mut |visit| {
             if let ExtentVisit::Leaf(extent) = visit {
-                if logical >= extent.logical && logical < extent.logical + extent.count {
+                if logical >= extent.logical && logical - extent.logical < extent.count {
                     result = Some(extent.physical + (logical - extent.logical) as u64);
                     return false;
                 }
             }
             true
-        });
-        result
+        })?;
+        Ok(result)
     }
 
     fn free_extents(&mut self, inode: &OnDiskInode) -> Result<(), FsError> {
@@ -338,7 +425,7 @@ impl<B: BlockDevice> ZenithFs<B> {
                 }
             }
             true
-        });
+        })?;
         Ok(())
     }
 
@@ -352,9 +439,9 @@ impl<B: BlockDevice> ZenithFs<B> {
         let mut data = Vec::with_capacity(size);
         let total = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
         for logical in 0..total {
-            let physical = match self.map_block(&inode, logical as u32) {
+            let physical = match self.map_block(&inode, logical as u32)? {
                 Some(block) => block as usize,
-                None => break,
+                None => return Err(FsError::IoError),
             };
             let mut buffer = [0u8; BLOCK_SIZE];
             self.device.read_block(physical, &mut buffer)?;
@@ -367,7 +454,7 @@ impl<B: BlockDevice> ZenithFs<B> {
     fn write_directory(&mut self, inode_number: u32, data: &[u8]) -> Result<(), FsError> {
         let inode = self.inodes[inode_number as usize];
         for logical in 0..(data.len() + BLOCK_SIZE - 1) / BLOCK_SIZE {
-            let physical = match self.map_block(&inode, logical as u32) {
+            let physical = match self.map_block(&inode, logical as u32)? {
                 Some(block) => block as usize,
                 None => return Err(FsError::IoError),
             };
@@ -377,7 +464,7 @@ impl<B: BlockDevice> ZenithFs<B> {
                 let end = (start + BLOCK_SIZE).min(data.len());
                 buffer[..end - start].copy_from_slice(&data[start..end]);
             }
-            self.device.write_block(physical, &buffer)?;
+            self.journal.stage(physical as u32, &buffer)?;
         }
         Ok(())
     }
@@ -421,39 +508,18 @@ impl<B: BlockDevice> ZenithFs<B> {
     }
 
     pub fn create_at(&mut self, parent: u32, name: &str, is_directory: bool) -> Result<u32, FsError> {
-        let parent_inode = self.inodes[parent as usize];
+        self.transaction(|fs| fs.create_entry(parent, name, is_directory))
+    }
+
+    fn create_entry(&mut self, parent: u32, name: &str, is_directory: bool) -> Result<u32, FsError> {
+        let parent_inode = *self.inodes.get(parent as usize).ok_or(FsError::FileNotFound)?;
         if !self.may(&parent_inode, Access::Write) || !self.may(&parent_inode, Access::Execute) {
             return Err(FsError::PermissionDenied);
         }
-        if name.is_empty() || name.len() > 56 || name.contains('/') || self.find_at(parent, name).is_some() {
+        if name.is_empty() || name.len() > 56 || name.contains(['/', '\0']) || matches!(name, "." | "..") || self.find_at(parent, name).is_some() {
             return Err(FsError::InvalidPath);
         }
         let inode_number = (1..INODE_COUNT).find(|&i| self.inodes[i].links == 0).ok_or(FsError::DiskFull)? as u32;
-
-        let mut data = self.read_directory(parent)?;
-        let slot = match data.chunks_exact(64).position(|entry| {
-            let record: OnDiskDirEntry = unsafe { core::ptr::read_unaligned(entry.as_ptr() as *const OnDiskDirEntry) };
-            record.inode == 0
-        }) {
-            Some(index) => index,
-            None => {
-                let block = self.allocate_block()?;
-                let parent_inode = &mut self.inodes[parent as usize];
-                let extend = Extent { logical: (data.len() / BLOCK_SIZE) as u32, count: 1, physical: block as u64 };
-                insert_extent(parent_inode, &extend, &mut self.device)?;
-                self.device.write_block(block as usize, &[0u8; BLOCK_SIZE])?;
-                data.extend_from_slice(&[0u8; BLOCK_SIZE]);
-                self.inodes[parent as usize].size = data.len() as u64;
-                data.len() / 64 - 1
-            }
-        };
-
-        let mut entry = OnDiskDirEntry { name: [0; 56], inode: inode_number,
-            file_type: if is_directory { 1 } else { 0 }, reserved: [0; 3] };
-        entry.name[..name.len()].copy_from_slice(name.as_bytes());
-        let bytes = as_bytes(&entry);
-        data[slot * 64..slot * 64 + bytes.len()].copy_from_slice(bytes);
-        self.write_directory(parent, &data)?;
 
         let mut inode = OnDiskInode::empty();
         inode.number = inode_number;
@@ -466,11 +532,36 @@ impl<B: BlockDevice> ZenithFs<B> {
             inode.size = BLOCK_SIZE as u64;
             let block = self.allocate_block()?;
             let extent = Extent { logical: 0, count: 1, physical: block as u64 };
-            insert_extent(&mut inode, &extent, &mut self.device)?;
-            self.device.write_block(block as usize, &[0u8; BLOCK_SIZE])?;
+            write_root_extent(&mut self.device, &mut inode, &extent)?;
+            self.device.write_block(block as usize, &[0; BLOCK_SIZE])?;
         }
+        let mut data = self.read_directory(parent)?;
+        let slot = match data.chunks_exact(64).position(|entry| {
+            let record: OnDiskDirEntry = unsafe { core::ptr::read_unaligned(entry.as_ptr() as *const OnDiskDirEntry) };
+            record.inode == 0
+        }) {
+            Some(index) => index,
+            None => {
+                let block = self.allocate_block()?;
+                let (mut runs, nodes) = self.extents(&parent_inode)?;
+                push_run(&mut runs, (data.len() / BLOCK_SIZE) as u32, block);
+                self.inodes[parent as usize].extent_root = self.build_tree(&runs)?;
+                for node in nodes { self.release_block(node); }
+                let first = data.len() / 64;
+                data.extend_from_slice(&[0u8; BLOCK_SIZE]);
+                self.inodes[parent as usize].size = data.len() as u64;
+                first
+            }
+        };
+
+        let mut entry = OnDiskDirEntry { name: [0; 56], inode: inode_number,
+            file_type: if is_directory { 1 } else { 0 }, reserved: [0; 3] };
+        entry.name[..name.len()].copy_from_slice(name.as_bytes());
+        let bytes = as_bytes(&entry);
+        data[slot * 64..slot * 64 + bytes.len()].copy_from_slice(bytes);
+        self.write_directory(parent, &data)?;
+
         self.inodes[inode_number as usize] = inode;
-        self.flush()?;
         Ok(inode_number)
     }
 
@@ -509,7 +600,7 @@ impl<B: BlockDevice> ZenithFs<B> {
         let offset = slot.ok_or(FsError::FileNotFound)?;
         data[offset..offset+56].fill(0);
         data[offset..offset+name.len()].copy_from_slice(name.as_bytes());
-        self.write_directory(parent, &data)
+        self.transaction(|fs| fs.write_directory(parent, &data))
     }
 
     // ---- file operations ---------------------------------------------------
@@ -523,44 +614,21 @@ impl<B: BlockDevice> ZenithFs<B> {
         if !self.may(&self.inodes[index], Access::Write) {
             return Err(FsError::PermissionDenied);
         }
-        let needed = (data.len() as u64 + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64;
-        if needed > u32::MAX as u64 { return Err(FsError::DiskFull); }
-
         let old_inode = self.inodes[index];
-        self.free_extents(&old_inode)?;
-        clear_extent_root(&mut self.inodes[index]);
-
-        let mut runs: Vec<(u32, u32)> = Vec::new();
-        let mut logical = 0u32;
-        let mut position = 0usize;
-        for chunk in data.chunks(BLOCK_SIZE) {
-            let block = self.allocate_block()?;
-            let mut buffer = [0u8; BLOCK_SIZE];
-            buffer[..chunk.len()].copy_from_slice(chunk);
-            self.device.write_block(block as usize, &buffer)?;
-
-            if let Some((start, length)) = runs.last_mut() {
-                if *start + *length == block {
-                    *length += 1;
-                } else {
-                    runs.push((block, 1));
-                }
-            } else {
-                runs.push((block, 1));
+        if old_inode.file_type != 0 { return Err(FsError::InvalidPath); }
+        self.transaction(|fs| {
+            let mut runs = Vec::new();
+            for (logical, chunk) in data.chunks(BLOCK_SIZE).enumerate() {
+                let block = fs.allocate_block()?;
+                let mut buffer = [0; BLOCK_SIZE];
+                buffer[..chunk.len()].copy_from_slice(chunk);
+                fs.device.write_block(block as usize, &buffer)?;
+                push_run(&mut runs, logical as u32, block);
             }
-            let _ = (logical, position);
-            logical += 1;
-            position += chunk.len();
-        }
-
-        for (physical, count) in runs {
-            let extent = Extent { logical: 0, count, physical: physical as u64 };
-            insert_extent(&mut self.inodes[index], &extent, &mut self.device)?;
-        }
-
-        self.inodes[index].size = data.len() as u64;
-        self.flush()?;
-        Ok(())
+            fs.inodes[index].extent_root = fs.build_tree(&runs)?;
+            fs.inodes[index].size = data.len() as u64;
+            fs.free_extents(&old_inode)
+        })
     }
 
     /// Read a range of a file.
@@ -577,20 +645,18 @@ impl<B: BlockDevice> ZenithFs<B> {
         let available = (size - offset) as usize;
         let length = length.min(available);
         let mut result = Vec::with_capacity(length);
-        let first_block = offset / BLOCK_SIZE as u64;
-        let mut within = (offset % BLOCK_SIZE as u64) as usize;
-
         while result.len() < length {
-            let logical = first_block + (result.len() as u64 / BLOCK_SIZE as u64);
+            let position = offset + result.len() as u64;
+            let logical = position / BLOCK_SIZE as u64;
+            let within = (position % BLOCK_SIZE as u64) as usize;
             let inode = self.inodes[index];
             let mut buffer = [0u8; BLOCK_SIZE];
-            if let Some(physical) = self.map_block(&inode, logical as u32) {
+            if let Some(physical) = self.map_block(&inode, logical as u32)? {
                 self.device.read_block(physical as usize, &mut buffer)?;
             }
             // Unmapped (sparse) regions read as zeroes.
             let take = (BLOCK_SIZE - within).min(length - result.len());
             result.extend_from_slice(&buffer[within..within + take]);
-            within = 0;
         }
         Ok(result)
     }
@@ -602,20 +668,53 @@ impl<B: BlockDevice> ZenithFs<B> {
             return Err(FsError::FileNotFound);
         }
         let old = self.inodes[index];
-        self.free_extents(&old)?;
-        clear_extent_root(&mut self.inodes[index]);
-        self.inodes[index].size = size;
-        self.flush()?;
-        Ok(())
+        if old.file_type != 0 { return Err(FsError::InvalidPath); }
+        if !self.may(&old, Access::Write) { return Err(FsError::PermissionDenied); }
+        if size.div_ceil(BLOCK_SIZE as u64) > u32::MAX as u64 { return Err(FsError::DiskFull); }
+        self.transaction(|fs| {
+            if size < old.size {
+                let (runs, nodes) = fs.extents(&old)?;
+                let mut kept = Vec::new();
+                let mut freed = Vec::new();
+                let full = (size / BLOCK_SIZE as u64) as u32;
+                let tail = size as usize % BLOCK_SIZE;
+                for run in runs {
+                    let n = full.saturating_sub(run.logical).min(run.count);
+                    if n > 0 { kept.push(Extent { count: n, ..run }); }
+                    if n < run.count {
+                        let start = run.physical + u64::from(n);
+                        if run.logical + n == full && tail != 0 {
+                            let mut buffer = [0; BLOCK_SIZE];
+                            fs.device.read_block(start as usize, &mut buffer)?;
+                            buffer[tail..].fill(0);
+                            let block = fs.allocate_block()?;
+                            fs.device.write_block(block as usize, &buffer)?;
+                            push_run(&mut kept, full, block);
+                        }
+                        freed.push(start..run.physical + u64::from(run.count));
+                    }
+                }
+                fs.inodes[index].extent_root = fs.build_tree(&kept)?;
+                for block in nodes.into_iter().chain(freed.into_iter().flatten()) {
+                    fs.release_block(block);
+                }
+            }
+            fs.inodes[index].size = size;
+            Ok(())
+        })
     }
 
     pub fn read(&mut self, inode_number: u32) -> Result<Vec<u8>, FsError> {
-        let size = self.inodes[inode_number as usize].size;
+        let size = self.stat(inode_number)?.0;
         if size > usize::MAX as u64 { return Err(FsError::IoError); }
         self.read_range(inode_number, 0, size as usize)
     }
 
     pub fn unlink(&mut self, path: &str) -> Result<(), FsError> {
+        self.transaction(|fs| fs.remove_entry(path))
+    }
+
+    fn remove_entry(&mut self, path: &str) -> Result<(), FsError> {
         let inode_number = self.resolve(path)?;
         if inode_number == ROOT_INODE { return Err(FsError::InvalidPath); }
         if self.stat(inode_number)?.1 && !self.list(path)?.is_empty() {
@@ -645,7 +744,6 @@ impl<B: BlockDevice> ZenithFs<B> {
         inode.links = 0;
         inode.size = 0;
         clear_extent_root(inode);
-        self.flush()?;
         Ok(())
     }
 
@@ -690,17 +788,18 @@ impl<B: BlockDevice> ZenithFs<B> {
         if self.uid != 0 && self.uid != owner {
             return Err(FsError::PermissionDenied);
         }
-        self.inodes[number as usize].permissions = mode & 0o7777;
-        self.flush()
+        self.transaction(|fs| { fs.inodes[number as usize].permissions = mode & 0o7777; Ok(()) })
     }
 
     /// Change a file or directory's owner and group (root only).
     pub fn chown(&mut self, path: &str, owner: u16, group: u16) -> Result<(), FsError> {
         if self.uid != 0 { return Err(FsError::PermissionDenied); }
         let number = self.resolve(path)?;
-        self.inodes[number as usize].owner = owner;
-        self.inodes[number as usize].group = group;
-        self.flush()
+        self.transaction(|fs| {
+            fs.inodes[number as usize].owner = owner;
+            fs.inodes[number as usize].group = group;
+            Ok(())
+        })
     }
 }
 
@@ -747,127 +846,57 @@ fn for_each_extent<B: BlockDevice>(
     root: &[u8],
     device: &mut B,
     visit: &mut dyn FnMut(ExtentVisit) -> bool,
-) {
-    let header = match read_header(root) { Some(header) => header, None => return };
+) -> Result<bool, FsError> {
+    // Older empty files have an all-zero inline root.
+    if root.len() == EXTENT_ROOT_BYTES && root.iter().all(|&b| b == 0) { return Ok(true); }
+    let header = read_header(root).ok_or(FsError::IoError)?;
+    if header.depth > 8 { return Err(FsError::IoError); }
     for index in 0..header.entries as usize {
         let offset = EXTENT_HEADER_SIZE + index * EXTENT_ENTRY_SIZE;
-        if offset + EXTENT_ENTRY_SIZE > root.len() { return; }
+        if offset + EXTENT_ENTRY_SIZE > root.len() { return Err(FsError::IoError); }
         if header.depth == 0 {
             let extent: Extent = unsafe { core::ptr::read_unaligned(root[offset..].as_ptr() as *const Extent) };
-            if !visit(ExtentVisit::Leaf(extent)) { return; }
+            if !visit(ExtentVisit::Leaf(extent)) { return Ok(false); }
         } else {
             let index_entry: ExtentIndex = unsafe { core::ptr::read_unaligned(root[offset..].as_ptr() as *const ExtentIndex) };
-            if !visit(ExtentVisit::Node(index_entry.child)) { return; }
+            if !visit(ExtentVisit::Node(index_entry.child)) { return Ok(false); }
             let mut buffer = [0u8; BLOCK_SIZE];
-            if device.read_block(index_entry.child as usize, &mut buffer).is_err() { return; }
-            for_each_extent(&buffer, device, visit);
-        }
-    }
-}
-
-/// Insert an extent into a tree, splitting nodes as needed.
-fn insert_extent<B: BlockDevice>(inode: &mut OnDiskInode, extent: &Extent, device: &mut B) -> Result<(), FsError> {
-    let header = read_header(&inode.extent_root).unwrap_or_else(|| ExtentHeader::new(0));
-    if header.depth != 0 {
-        return insert_at_depth(&mut inode.extent_root, header.depth, extent, device);
-    }
-
-    let mut header = header;
-    if header.entries as usize >= EXTENT_ENTRIES {
-        // Split the root into a new level of child nodes.
-        let mut children = [0u8; EXTENT_ROOT_BYTES];
-        let mut child_header = ExtentHeader::new(1);
-        for index in 0..header.entries as usize {
-            let offset = EXTENT_HEADER_SIZE + index * EXTENT_ENTRY_SIZE;
-            let old: Extent = unsafe { core::ptr::read_unaligned(inode.extent_root[offset..].as_ptr() as *const Extent) };
-            let block = allocate_node(device)?;
-            let mut buffer = [0u8; BLOCK_SIZE];
-            let mut leaf_header = ExtentHeader::new(0);
-            leaf_header.entries = 1;
-            write_header(&mut buffer, &leaf_header);
-            buffer[EXTENT_HEADER_SIZE..EXTENT_HEADER_SIZE + EXTENT_ENTRY_SIZE].copy_from_slice(as_bytes(&old));
-            device.write_block(block as usize, &buffer)?;
-
-            let index_entry = ExtentIndex { logical: old.logical, child: block, reserved: 0 };
-            children[EXTENT_HEADER_SIZE + child_header.entries as usize * EXTENT_ENTRY_SIZE
-                ..EXTENT_HEADER_SIZE + (child_header.entries as usize + 1) * EXTENT_ENTRY_SIZE]
-                .copy_from_slice(as_bytes(&index_entry));
-            child_header.entries += 1;
-        }
-        write_header(&mut children, &child_header);
-        inode.extent_root = children;
-        header = child_header;
-        header.entries = 0;
-        write_header(&mut inode.extent_root, &header);
-    }
-
-    let offset = EXTENT_HEADER_SIZE + header.entries as usize * EXTENT_ENTRY_SIZE;
-    inode.extent_root[offset..offset + EXTENT_ENTRY_SIZE].copy_from_slice(as_bytes(extent));
-    header.entries += 1;
-    write_header(&mut inode.extent_root, &header);
-    Ok(())
-}
-
-fn insert_at_depth<B: BlockDevice>(node: &mut [u8], depth: u16, extent: &Extent, device: &mut B) -> Result<(), FsError> {
-    let mut header = read_header(node).ok_or(FsError::IoError)?;
-    for index in 0..header.entries as usize {
-        let offset = EXTENT_HEADER_SIZE + index * EXTENT_ENTRY_SIZE;
-        if depth == 1 {
-            let existing: Extent = unsafe { core::ptr::read_unaligned(node[offset..].as_ptr() as *const Extent) };
-            if extent.logical >= existing.logical && extent.logical < existing.logical + existing.count {
-                return Ok(());
+            device.read_block(index_entry.child as usize, &mut buffer)?;
+            if read_header(&buffer).map(|h| h.depth) != Some(header.depth - 1) {
+                return Err(FsError::IoError);
             }
-        } else {
-            let index_entry: ExtentIndex = unsafe { core::ptr::read_unaligned(node[offset..].as_ptr() as *const ExtentIndex) };
-            if extent.logical >= index_entry.logical {
-                let mut buffer = [0u8; BLOCK_SIZE];
-                device.read_block(index_entry.child as usize, &mut buffer)?;
-                insert_at_depth(&mut buffer, depth - 1, extent, device)?;
-                device.write_block(index_entry.child as usize, &buffer)?;
-                return Ok(());
-            }
+            if !for_each_extent(&buffer, device, visit)? { return Ok(false); }
         }
     }
-    if header.entries as usize >= EXTENT_ENTRIES {
-        return Err(FsError::DiskFull);
-    }
-    let offset = EXTENT_HEADER_SIZE + header.entries as usize * EXTENT_ENTRY_SIZE;
-    if depth == 1 {
-        node[offset..offset + EXTENT_ENTRY_SIZE].copy_from_slice(as_bytes(extent));
-    } else {
-        let child = allocate_node(device)?;
-        let mut buffer = [0u8; BLOCK_SIZE];
-        write_header(&mut buffer, &ExtentHeader::new(depth - 1));
-        device.write_block(child as usize, &buffer)?;
-        let index_entry = ExtentIndex { logical: extent.logical, child, reserved: 0 };
-        node[offset..offset + EXTENT_ENTRY_SIZE].copy_from_slice(as_bytes(&index_entry));
-    }
-    header.entries += 1;
-    write_header(node, &header);
-    Ok(())
+    Ok(true)
 }
 
-fn allocate_node<B: BlockDevice>(device: &mut B) -> Result<u64, FsError> {
-    // Node blocks are allocated from the top of the usable area and tracked by
-    // a reserved marker in the superblock's free count; the caller writes the
-    // node contents immediately, so a zeroed block suffices here.
-    let block = superblock_hint(device)?;
-    device.write_block(block as usize, &[0u8; BLOCK_SIZE])?;
-    Ok(block)
+fn push_run(runs: &mut Vec<Extent>, logical: u32, block: u32) {
+    if let Some(last) = runs.last_mut() {
+        if last.logical + last.count == logical && last.physical + u64::from(last.count) == u64::from(block) {
+            last.count += 1;
+            return;
+        }
+    }
+    runs.push(Extent { logical, count: 1, physical: u64::from(block) });
 }
 
-fn superblock_hint<B: BlockDevice>(device: &mut B) -> Result<u64, FsError> {
-    let mut block = [0u8; BLOCK_SIZE];
-    device.read_block(0, &mut block)?;
-    let superblock: OnDiskSuperBlock = unsafe { core::ptr::read_unaligned(block.as_ptr() as *const OnDiskSuperBlock) };
-    Ok(superblock.total_blocks as u64 - 1)
+fn pack_node(bytes: &mut [u8], depth: u16, entries: &[(u32, [u8; EXTENT_ENTRY_SIZE])]) {
+    let mut header = ExtentHeader::new(depth);
+    header.max = ((bytes.len() - EXTENT_HEADER_SIZE) / EXTENT_ENTRY_SIZE) as u16;
+    header.entries = entries.len() as u16;
+    write_header(bytes, &header);
+    for (slot, (_, entry)) in bytes[EXTENT_HEADER_SIZE..].chunks_exact_mut(EXTENT_ENTRY_SIZE).zip(entries) {
+        slot.copy_from_slice(entry);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct MemoryDevice { blocks: Vec<[u8; BLOCK_SIZE]> }
+    #[derive(Clone)]
+    struct MemoryDevice { blocks: Vec<[u8; BLOCK_SIZE]>, writes_left: Option<usize> }
 
     impl BlockDevice for MemoryDevice {
         fn read_block(&mut self, block: usize, buffer: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
@@ -876,6 +905,10 @@ mod tests {
             Ok(())
         }
         fn write_block(&mut self, block: usize, data: &[u8; BLOCK_SIZE]) -> Result<(), FsError> {
+            if let Some(left) = &mut self.writes_left {
+                if *left == 0 { return Err(FsError::IoError); }
+                *left -= 1;
+            }
             if block >= self.blocks.len() { return Err(FsError::InvalidBlockNumber); }
             self.blocks[block].copy_from_slice(data);
             Ok(())
@@ -884,7 +917,125 @@ mod tests {
     }
 
     fn memory(count: usize) -> MemoryDevice {
-        MemoryDevice { blocks: vec![[0; BLOCK_SIZE]; count] }
+        MemoryDevice { blocks: vec![[0; BLOCK_SIZE]; count], writes_left: None }
+    }
+
+    #[test]
+    fn fragmented_replacement_and_unaligned_reads_survive_remount() {
+        let mut dev = memory(256);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fs = ZenithFs::mount(dev).unwrap();
+        for i in 0..45 {
+            let id = fs.create(&alloc::format!("slot{i}"), false).unwrap();
+            fs.write(id, &[i; BLOCK_SIZE]).unwrap();
+        }
+        for i in (0..40).step_by(2) {
+            fs.unlink(&alloc::format!("slot{i}")).unwrap();
+        }
+        let id = fs.create("fragmented", false).unwrap();
+        let data: Vec<_> = (0..18 * BLOCK_SIZE + 17).map(|i| (i / BLOCK_SIZE) as u8).collect();
+        fs.write(id, &data).unwrap();
+        let mut fs = ZenithFs::mount(fs.device).unwrap();
+        assert_eq!(fs.read(id).unwrap(), data);
+        assert_eq!(fs.read_range(id, 509, 782).unwrap(), data[509..1291]);
+        assert_eq!(fs.read_range(id, data.len() as u64 - 2, 99).unwrap(), data[data.len()-2..]);
+        for i in (1..45).step_by(2) {
+            let neighbor = fs.find(&alloc::format!("slot{i}")).unwrap();
+            assert_eq!(fs.read(neighbor).unwrap(), [i; BLOCK_SIZE]);
+        }
+    }
+
+    #[test]
+    fn disk_full_does_not_destroy_previous_contents_or_leak_blocks() {
+        let mut dev = memory(64);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fs = ZenithFs::mount(dev).unwrap();
+        let id = fs.create("notes", false).unwrap();
+        fs.write(id, b"original").unwrap();
+        let free = fs.superblock().free_blocks;
+        assert_eq!(fs.write(id, &[3; 64 * BLOCK_SIZE]), Err(FsError::DiskFull));
+        assert_eq!(fs.read(id).unwrap(), b"original");
+        assert_eq!(fs.superblock().free_blocks, free);
+        let mut fs = ZenithFs::mount(fs.device).unwrap();
+        assert_eq!(fs.read(id).unwrap(), b"original");
+    }
+
+    #[test]
+    fn interrupted_saves_recover_one_complete_generation() {
+        let mut dev = memory(128);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fs = ZenithFs::mount(dev).unwrap();
+        let id = fs.create("notes", false).unwrap();
+        fs.write(id, b"yesterday").unwrap();
+        let new = [17; 3 * BLOCK_SIZE + 5];
+        for budget in 0..100 {
+            let mut attempt = ZenithFs::mount(fs.device.clone()).unwrap();
+            attempt.device.writes_left = Some(budget);
+            let result = attempt.write(id, &new);
+            attempt.device.writes_left = None;
+            let mut recovered = ZenithFs::mount(attempt.device).unwrap();
+            let bytes = recovered.read(id).unwrap();
+            if result.is_ok() { assert_eq!(bytes, new); return; }
+            assert!(bytes == b"yesterday" || bytes == new, "cut after {budget} writes");
+        }
+        panic!("never reached uninterrupted commit");
+    }
+
+    #[test]
+    fn shrinking_retains_prefix_and_sparse_growth_clears_removed_tail() {
+        let mut dev = memory(80);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fs = ZenithFs::mount(dev).unwrap();
+        let id = fs.create("notes", false).unwrap();
+        fs.write(id, &[7; 1200]).unwrap();
+        fs.truncate(id, 519).unwrap();
+        fs.truncate(id, 1600).unwrap();
+        let mut fs = ZenithFs::mount(fs.device).unwrap();
+        let bytes = fs.read(id).unwrap();
+        assert_eq!(&bytes[..519], &[7; 519]);
+        assert_eq!(&bytes[519..], &[0; 1081]);
+    }
+
+    #[test]
+    fn interrupted_directory_growth_never_publishes_a_dangling_entry() {
+        let mut dev = memory(128);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fs = ZenithFs::mount(dev).unwrap();
+        for i in 0..8 { fs.create(&alloc::format!("entry{i}"), false).unwrap(); }
+        for budget in 0..100 {
+            let mut attempt = ZenithFs::mount(fs.device.clone()).unwrap();
+            attempt.device.writes_left = Some(budget);
+            let result = attempt.create("folder", true);
+            attempt.device.writes_left = None;
+            let mut recovered = ZenithFs::mount(attempt.device).unwrap();
+            let entries = recovered.list("/").unwrap();
+            if let Some(id) = recovered.find("folder") {
+                assert_eq!(recovered.stat(id), Ok((BLOCK_SIZE as u64, true)));
+                assert!(recovered.list("/folder").unwrap().is_empty());
+                assert_eq!(entries.len(), 9);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(entries.len(), 8);
+            }
+            if result.is_ok() { return; }
+        }
+        panic!("directory transaction never completed");
+    }
+
+    #[test]
+    fn reformat_reclaims_old_inodes_and_clears_the_journal() {
+        let mut dev = memory(64);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fs = ZenithFs::mount(dev).unwrap();
+        let id = fs.create("old", false).unwrap();
+        fs.write(id, b"old contents").unwrap();
+        let mut dev = fs.device;
+        dev.blocks[64-JOURNAL_BLOCKS].fill(0xff);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fresh = ZenithFs::mount(dev).unwrap();
+        assert!(fresh.list("/").unwrap().is_empty());
+        assert_eq!(fresh.stat(id), Err(FsError::FileNotFound));
+        assert_eq!(fresh.device.blocks[64-JOURNAL_BLOCKS], [0; BLOCK_SIZE]);
     }
 
     #[test]
@@ -1047,10 +1198,12 @@ mod tests {
         header[4..12].copy_from_slice(&7u64.to_le_bytes());
         header[12..20].copy_from_slice(&1u64.to_le_bytes());
         header[20..24].copy_from_slice(&1u32.to_le_bytes());
+        header[24..28].copy_from_slice(&u32::from(record[0]).to_le_bytes());
         header[64..68].copy_from_slice(&0u32.to_le_bytes());
         device.write_block(journal_start, &header).unwrap();
         device.blocks[0][12..16].copy_from_slice(&0u32.to_le_bytes());
         let fs = ZenithFs::mount(device).unwrap();
-        assert_eq!(fs.superblock().free_blocks, 1234);
+        assert_eq!(fs.device.blocks[0][12..16], 1234u32.to_le_bytes());
+        assert_eq!(fs.device.blocks[journal_start], [0; BLOCK_SIZE]);
     }
 }

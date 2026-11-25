@@ -110,6 +110,10 @@ impl BlockDevice for AtaBlockDevice {
     fn block_count(&self) -> usize {
         FS_BLOCKS
     }
+
+    fn sync(&mut self) -> Result<(), FsError> {
+        ata::flush_cache().map_err(|_| FsError::IoError)
+    }
 }
 
 /// Mount Zenith FS, creating it on first boot. A counter file proves that data
@@ -120,10 +124,17 @@ pub fn init() {
     let mut probe = [0u8; BLOCK_SIZE];
     let needs_format = match ata::read_sector(FS_BASE_LBA as u32, &mut probe) {
         Ok(()) => u32::from_le_bytes([probe[0], probe[1], probe[2], probe[3]]) != 0x5A45_4E49,
-        Err(_) => true,
+        Err(_) => { diagnostics::debug("[fs] no readable data disk"); return; }
     };
 
     if needs_format {
+        // A missing signature is not consent to overwrite another volume.
+        // Only initialize a blank region on an unpartitioned data disk.
+        if ata::read_sector(0, &mut probe).is_err() || probe != [0; BLOCK_SIZE]
+            || !(0..FS_BLOCKS).all(|i| device.read_block(i, &mut probe).is_ok() && probe == [0; BLOCK_SIZE]) {
+            diagnostics::debug("[fs] unrecognized data disk; leaving it untouched");
+            return;
+        }
         if let Err(error) = ZenithFs::format(&mut device) {
             diagnostics::puts("[fs] Zenith FS format failed: ");
             diagnostics::puts(match error {

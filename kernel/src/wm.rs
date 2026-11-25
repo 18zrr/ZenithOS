@@ -994,6 +994,23 @@ pub fn settings_input_active() -> bool {
     wm.initialized && wm.settings_focused() && wm.display_input_active
 }
 
+/// Cycle open windows in stable slot order, including minimized windows.
+pub fn cycle_window(reverse: bool) {
+    let mut wm = WM.lock();
+    let start = wm.top_visible().unwrap_or(if reverse { 0 } else { MAX_WINDOWS - 1 });
+    for step in 1..=MAX_WINDOWS {
+        let i = (start + if reverse { MAX_WINDOWS - step } else { step }) % MAX_WINDOWS;
+        if let Some(w) = wm.windows[i].as_mut() {
+            w.minimized = false;
+            wm.focus_index(i);
+            wm.dragging = None;
+            wm.resizing = None;
+            invalidate();
+            break;
+        }
+    }
+}
+
 /// Raise and focus the terminal window. Returns false when no terminal exists.
 pub fn focus_terminal() -> bool {
     let mut wm = WM.lock();
@@ -1647,7 +1664,10 @@ impl Wm {
             3 => self.open_window(WindowKind::About),
             4 => return Action::Installer,
             5 => self.open_window(WindowKind::Browser),
-            6 => { self.files.refresh(); self.open_window(WindowKind::Files); }
+            6 => {
+                if self.find(WindowKind::Files).is_none() { self.files.refresh(); }
+                self.open_window(WindowKind::Files);
+            }
             _ => {}
         }
         invalidate();
@@ -3054,10 +3074,9 @@ fn wallpaper_button(window: &Window) -> Rect {
 
 pub fn file_key(event: KeyEvent) -> bool {
     let mut wm=WM.lock();
-    if !wm.top_visible().and_then(|i| wm.windows[i]).is_some_and(|w| w.kind==WindowKind::Files) {
-        return false;
-    }
-    wm.files.key(event.key);
+    let Some(window) = wm.top_visible().and_then(|i| wm.windows[i]) else { return false; };
+    if window.kind != WindowKind::Files { return false; }
+    wm.files.key(event, &window);
     invalidate();
     true
 }

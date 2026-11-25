@@ -16,6 +16,7 @@ enum Mode {
     Rename,
     Copy,
     Delete,
+    Edit,
 }
 
 pub(super) struct Files {
@@ -25,11 +26,13 @@ pub(super) struct Files {
     mode: Mode,
     input: String,
     status: String,
+    cursor: usize,
 }
 
-const TOOLS: [&str; 7] = [
-    "Up", "Open", "+ File", "+ Folder", "Rename", "Copy", "Delete",
+const TOOLS: [&str; 8] = [
+    "Up", "Open", "+ File", "+ Folder", "Rename", "Copy", "Delete", "Edit",
 ];
+const NOTE_LIMIT: usize = 4096;
 
 impl Files {
     pub const fn new() -> Self {
@@ -40,6 +43,7 @@ impl Files {
             mode: Mode::Browse,
             input: String::new(),
             status: String::new(),
+            cursor: 0,
         }
     }
 
@@ -101,6 +105,7 @@ impl Files {
                 };
             }
             4 => {
+                self.input.push_str(name);
                 self.mode = Mode::Rename;
             }
             5 if !folder => {
@@ -108,6 +113,22 @@ impl Files {
             }
             5 => self.status = "Select a file to copy".into(),
             6 => self.mode = Mode::Delete,
+            7 if !folder => {
+                match volume(|fs| {
+                    let id = fs.resolve(&path)?;
+                    fs.read_range(id, 0, NOTE_LIMIT + 1)
+                }) {
+                    Ok(data) if data.len() <= NOTE_LIMIT && data.iter().all(|b| matches!(b, b'\n' | 32..=126)) => {
+                        self.input = String::from_utf8(data).unwrap();
+                        self.cursor = self.input.len();
+                        self.mode = Mode::Edit;
+                        self.status = "Ctrl+S: save   Esc: discard".into();
+                    }
+                    Ok(_) => self.status = "Edit supports ASCII notes up to 4 KiB (LF newlines)".into(),
+                    Err(e) => self.status = e.to_string(),
+                }
+            }
+            7 => self.status = "Select a text file to edit".into(),
             _ => {}
         }
     }
@@ -150,7 +171,7 @@ impl Files {
                 Ok(())
             }
             Mode::Delete => fs.unlink(src.as_deref().ok_or(FsError::FileNotFound)?),
-            Mode::Browse => Ok(()),
+            Mode::Browse | Mode::Edit => Ok(()),
         });
         if copy_too_large {
             self.mode = Mode::Browse;
@@ -167,7 +188,50 @@ impl Files {
         }
     }
 
-    pub fn key(&mut self, key: Key) {
+    pub fn key(&mut self, event: KeyEvent, w: &Window) {
+        let key = event.key;
+        if self.mode == Mode::Edit {
+            if event.ctrl && matches!(key, Key::Char(b's' | b'S')) {
+                let path = format!("{}/{}", self.dir, self.entries[self.selected].0);
+                match volume(|fs| { let id = fs.resolve(&path)?; fs.write(id, self.input.as_bytes()) }) {
+                    Ok(()) => { self.refresh(); self.status = "Saved".into(); }
+                    Err(e) => self.status = format!("Save failed: {e}   Ctrl+S: retry   Esc: discard"),
+                }
+            } else {
+                match key {
+                    Key::Escape => { self.mode = Mode::Browse; self.status = "Edit closed without saving".into(); }
+                    Key::Left => self.cursor = self.cursor.saturating_sub(1),
+                    Key::Right => self.cursor = (self.cursor + 1).min(self.input.len()),
+                    Key::Up | Key::Down => {
+                        let start = self.input[..self.cursor].rfind('\n').map_or(0, |n| n+1);
+                        let column = self.cursor - start;
+                        if key == Key::Up && start > 0 {
+                            let previous = self.input[..start-1].rfind('\n').map_or(0, |n| n+1);
+                            self.cursor = previous + column.min(start-1-previous);
+                        } else if key == Key::Down {
+                            if let Some(end) = self.input[self.cursor..].find('\n') {
+                                let next = self.cursor + end + 1;
+                                let line = self.input[next..].split('\n').next().unwrap_or("");
+                                self.cursor = next + column.min(line.len());
+                            }
+                        }
+                    }
+                    Key::Home => self.cursor = self.input[..self.cursor].rfind('\n').map_or(0, |n| n+1),
+                    Key::End => self.cursor += self.input[self.cursor..].find('\n').unwrap_or(self.input.len()-self.cursor),
+                    Key::Backspace if self.cursor > 0 => { self.cursor -= 1; self.input.remove(self.cursor); }
+                    Key::Delete if self.cursor < self.input.len() => { self.input.remove(self.cursor); }
+                    Key::Enter | Key::Char(32..=126) if !event.ctrl && !event.alt => {
+                        if self.input.len() < NOTE_LIMIT {
+                            let c = if let Key::Char(b) = key { b as char } else { '\n' };
+                            self.input.insert(self.cursor, c);
+                            self.cursor += 1;
+                        } else { self.status = "4 KiB limit reached   Ctrl+S: save   Esc: discard".into(); }
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
         if self.mode != Mode::Browse {
             match key {
                 Key::Enter => self.submit(),
@@ -183,6 +247,10 @@ impl Files {
             return;
         }
         match key {
+            Key::Home => self.selected = 0,
+            Key::End => self.selected = self.entries.len().saturating_sub(1),
+            Key::PageUp => self.selected = self.selected.saturating_sub(self.list_geometry(w).1.max(1)),
+            Key::PageDown => self.selected = (self.selected + self.list_geometry(w).1.max(1)).min(self.entries.len().saturating_sub(1)),
             Key::Up => self.selected = self.selected.saturating_sub(1),
             Key::Down => {
                 self.selected = (self.selected + 1).min(self.entries.len().saturating_sub(1))
@@ -194,13 +262,14 @@ impl Files {
             Key::Char(b'n') => self.tool(2),
             Key::Char(b'd') => self.tool(3),
             Key::Char(b'c') => self.tool(5),
+            Key::Char(b'e') => self.tool(7),
             Key::Delete => self.tool(6),
             _ => {}
         }
     }
 
-    fn buttons(w: &Window) -> [Rect; 7] {
-        let cols = if w.w >= 550 { 7 } else { 4 };
+    fn buttons(w: &Window) -> [Rect; TOOLS.len()] {
+        let cols = if w.w >= 600 { TOOLS.len() } else { 4 };
         let width = (w.w - 24) / cols;
         core::array::from_fn(|i| {
             Rect::new(
@@ -212,7 +281,7 @@ impl Files {
         })
     }
     fn list_geometry(&self, w: &Window) -> (i32, usize, usize) {
-        let y = Self::buttons(w)[6].y + 57;
+        let y = Self::buttons(w)[TOOLS.len() - 1].y + 57;
         let rows = ((w.y + w.h as i32 - 34 - y).max(0) / 24) as usize;
         (
             y,
@@ -248,6 +317,35 @@ impl Files {
         let left = w.x + 12;
         let right = w.x + w.w as i32 - 12;
         let path_y = w.y + TITLEBAR_H as i32 + 6;
+        if self.mode == Mode::Edit {
+            draw_text(f, stride, h, left, path_y, right, &self.entries[self.selected].0, FG);
+            let rows = (w.h.saturating_sub(TITLEBAR_H + 76) / ROW_PITCH).max(1);
+            let cols = (w.w.saturating_sub(24) / COL_PITCH).max(1);
+            let position = |row: &mut usize, col: &mut usize, byte| {
+                if byte == b'\n' { *row += 1; *col = 0; }
+                else { *col += 1; if *col == cols { *row += 1; *col = 0; } }
+            };
+            let (mut row, mut col) = (0usize, 0usize);
+            for &b in &self.input.as_bytes()[..self.cursor] { position(&mut row, &mut col, b); }
+            let first = row.saturating_sub(rows - 1);
+            let text_y = path_y + 30;
+            let (cx, cy) = (left + (col * COL_PITCH) as i32, text_y + ((row-first)*ROW_PITCH) as i32);
+            row = 0; col = 0;
+            for &b in self.input.as_bytes() {
+                if row >= first + rows { break; }
+                if row >= first && b != b'\n' {
+                    let x = left + (col * COL_PITCH) as i32;
+                    let y = text_y + ((row - first) * ROW_PITCH) as i32;
+                    if x >= 0 && y >= 0 {
+                        fb::draw_glyph_to(f, stride, h, x as usize, y as usize, b, FG);
+                    }
+                }
+                position(&mut row, &mut col, b);
+            }
+            fill(f,stride,h,cx,cy,1,ROW_PITCH,ACCENTS[0]);
+            draw_text(f,stride,h,left,w.y+w.h as i32-29,right,&self.status,MUTED);
+            return;
+        }
         rounded_rect(f, stride, h, left, path_y, w.w - 24, 32, 8, SEARCH_BG);
         draw_text(
             f,
@@ -344,7 +442,7 @@ impl Files {
             draw_text(f, stride, h, left + 36, y + 2, right - 86, name, FG);
         }
         let prompt = match self.mode {
-            Mode::Browse => self.status.as_str(),
+            Mode::Browse | Mode::Edit => self.status.as_str(),
             Mode::File => "New file:",
             Mode::Folder => "New folder:",
             Mode::Rename => "Rename to:",

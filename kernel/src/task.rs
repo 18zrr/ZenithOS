@@ -456,6 +456,10 @@ fn shell_task() {
                 continue;
             }
 
+            if event.alt && event.key == keyboard::Key::Tab {
+                crate::wm::cycle_window(event.shift);
+                continue;
+            }
             if crate::wm::browser_key(event) {
                 continue;
             }

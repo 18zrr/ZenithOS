@@ -35,6 +35,10 @@ impl Journal {
         Journal { records: Vec::new() }
     }
 
+    pub(crate) fn discard(&mut self) {
+        self.records.clear();
+    }
+
     /// Stage a block's new contents.
     pub fn stage(&mut self, block: u32, data: &[u8; BLOCK_SIZE]) -> Result<(), FsError> {
         if self.records.len() >= JOURNAL_BLOCKS - 1 {
@@ -86,7 +90,9 @@ impl Journal {
             )
         };
         header_block[..bytes.len()].copy_from_slice(bytes);
+        device.sync()?; // file data, tree nodes and journal records before marker
         device.write_block(start + HEADER_BLOCK, &header_block)?;
+        device.sync()?;
 
         // Phase 3: apply to real blocks.
         for (number, data) in &self.records {
@@ -94,7 +100,9 @@ impl Journal {
         }
 
         // Phase 4: clear the journal header.
+        device.sync()?;
         device.write_block(start + HEADER_BLOCK, &[0u8; BLOCK_SIZE])?;
+        device.sync()?;
         self.records.clear();
         Ok(())
     }
@@ -109,20 +117,31 @@ impl Journal {
         if header.magic != JOURNAL_MAGIC || header.committed == 0 {
             return Ok(false);
         }
-        let _ = header.checksum;
+        let count = header.record_count as usize;
+        if count == 0 || count >= JOURNAL_BLOCKS { return Err(FsError::IoError); }
 
         let numbers_offset = 64;
-        for index in 0..header.record_count as usize {
+        let mut records = Vec::with_capacity(count);
+        let mut checksum = 0u32;
+        for index in 0..count {
             let offset = numbers_offset + index * 4;
             let number = u32::from_le_bytes([
                 header_block[offset], header_block[offset + 1],
                 header_block[offset + 2], header_block[offset + 3],
             ]);
             let mut data = [0u8; BLOCK_SIZE];
+            if number as usize >= start { return Err(FsError::IoError); }
             device.read_block(start + 1 + index, &mut data)?;
+            checksum = checksum.wrapping_add(number).wrapping_add(data[0] as u32);
+            records.push((number, data));
+        }
+        if checksum != header.checksum { return Err(FsError::IoError); }
+        for (number, data) in records {
             device.write_block(number as usize, &data)?;
         }
+        device.sync()?;
         device.write_block(start + HEADER_BLOCK, &[0u8; BLOCK_SIZE])?;
+        device.sync()?;
         Ok(true)
     }
 }

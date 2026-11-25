@@ -1,5 +1,42 @@
 # Zenith OS v0.3.1 — Nightfall
 
+## Fixed
+
+- Fixed fragmented writes losing their logical offsets, extent index blocks
+  colliding with file data, and unaligned reads repeating the wrong block.
+- File replacements use copy-on-write. Running out of space leaves the old
+  contents intact. Truncate preserves the retained prefix and zero-fills
+  newly exposed bytes on later expansion.
+- Journal directory updates together with inode changes. Recovery checks the
+  record count, destinations and existing v5 checksum before replay. A failed
+  journal commit blocks further mutations until the volume is remounted.
+- Reformatting clears stale inode and journal records; mounting rebuilds free
+  space accounting and rejects overlapping or out-of-range allocations.
+- Flush the ATA write cache between journal phases. Boot-time setup checks
+  that both the boot sector and target region are blank before formatting.
+
+## Added
+
+- File Manager **Edit** / **E** for ASCII notes up to 4 KiB. **Ctrl+S** saves,
+  **Esc** discards; the draft stays open if saving fails.
+- **Alt+Tab** and **Alt+Shift+Tab** to cycle and restore open windows; directory
+  paging, Home/End, and prefilled rename in File Manager.
+- Regression tests for fragmented files, unaligned reads, disk-full saves,
+  interrupted writes and sparse truncation. The QEMU smoke test drives the
+  desktop with keyboard input, checks the saved bytes after a reboot, and
+  verifies a separate unrecognized disk remains byte-for-byte unchanged.
+
+## Compatibility
+
+Zenith FS stays at **format v5**. Copy-on-write saves require room for the new
+data and index blocks before old space can be reused. These changes prevent
+new corruption; they do not repair files damaged by previous builds.
+
+## Nightfall desktop
+
+- The file manager and installer share the mounted volume. Desktop preferences
+  persist on writable Zenith FS disks, and the launcher adds logout, restart
+  and shutdown controls with ACPI support.
 - New moonlit lake wallpaper, with the plain gradient still available in Settings.
 - The launcher uses a three-column icon grid on wider desktops and a compact
   two-column layout on smaller screens. File Manager is now pinned to the dock.

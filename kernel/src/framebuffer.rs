@@ -373,7 +373,7 @@ pub fn scroll_offset() -> usize {
 }
 
 
-fn draw_glyph_to(
+pub(crate) fn draw_glyph_to(
     frame: &mut [u32],
     stride: usize,
     height: usize,

@@ -119,7 +119,8 @@ See [Troubleshooting](Troubleshooting.md) for display problems.
   compositing is done on the CPU.
 - Software framebuffer with live switching on Bochs VBE VMs, no physical-GPU
   mode setting, no HiDPI scaling, no multi-monitor
-  support, window snapping, Alt-Tab switcher, or animations.
+  support, window snapping, or animations. Alt+Tab cycles open windows;
+  Alt+Shift+Tab reverses direction.
 - Mouse input works over PS/2 and USB HID. USB support is UHCI only: EHCI/xHCI,
   hotplug, USB keyboards and multiple HID devices are not supported.
 - The graphical desktop needs a Limine-provided linear framebuffer. QEMU's
