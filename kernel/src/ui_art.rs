@@ -1,7 +1,7 @@
 //! UI coverage masks; the shell and recovery text retain their fixed-cell grid.
 //! DejaVu license: LICENSES/DejaVu.txt. Regenerate with tools/generate_ui_art.py.
 static FONT: &[u8; 95 * 361] = include_bytes!("ui_font.alpha");
-pub static ICONS: &[u8; 6 * 32 * 32] = include_bytes!("app_icons.alpha");
+pub static ICONS: &[u8; 7 * 32 * 32] = include_bytes!("app_icons.alpha");
 
 fn glyph(c: u8) -> &'static [u8] {
     let c = if (32..127).contains(&c) { c } else { b'?' };

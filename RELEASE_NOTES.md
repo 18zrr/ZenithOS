@@ -1,3 +1,14 @@
+# Zenith OS v0.3.1 — Nightfall
+
+- New moonlit lake wallpaper, with the plain gradient still available in Settings.
+- The launcher uses a three-column icon grid on wider desktops and a compact
+  two-column layout on smaller screens. File Manager is now pinned to the dock.
+- File Manager gains a path bar, file and folder icons, and distinct name and
+  kind columns. About and the welcome screen share the refreshed visual style.
+- System version labels now follow the kernel package version.
+
+[Desktop preview](docs/nightfall-desktop.png)
+
 # Zenith OS v0.2.0 — Browser companion and desktop fixes
 
 ## Update notes — 2026-11-19

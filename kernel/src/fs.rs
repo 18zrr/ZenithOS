@@ -77,7 +77,18 @@ impl BlockDevice for NtfsAtaBlockDevice {
     }
 }
 
-struct AtaBlockDevice;
+pub(crate) struct AtaBlockDevice;
+
+// Keep one authoritative inode/extent cache for installer and desktop writes.
+static VOLUME: crate::sync::SpinLock<Option<ZenithFs<AtaBlockDevice>>> =
+    crate::sync::SpinLock::new(None);
+
+pub(crate) fn volume<T>(f: impl FnOnce(&mut ZenithFs<AtaBlockDevice>) -> Result<T, FsError>)
+    -> Result<T, FsError>
+{
+    let mut mounted = VOLUME.lock();
+    f(mounted.as_mut().ok_or(FsError::InvalidMagicNumber)?)
+}
 
 impl BlockDevice for AtaBlockDevice {
     fn read_block(&mut self, block: usize, buffer: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
@@ -160,6 +171,7 @@ pub fn init() {
     diagnostics::puts("[fs] Zenith FS mounted; boot count = ");
     diagnostics::put_hex(count as u64);
     diagnostics::puts("\n");
+    *VOLUME.lock() = Some(fs);
 
     init_fat32();
     init_ntfs();
@@ -180,12 +192,13 @@ pub fn installer_write() -> Result<(), &'static str> {
         }
     };
 
-    let mut fs = ZenithFs::mount(AtaBlockDevice).map_err(map_error)?;
+    let mut mounted = VOLUME.lock();
+    let fs = mounted.as_mut().ok_or("filesystem not present")?;
     fs.create_path("/boot", true).map_err(map_error)?;
     let inode = fs
         .create_path("/boot/ZENITH.CONF", false)
         .map_err(map_error)?;
-    let manifest = b"Zenith OS v0.3.0\ninstalled-by=setup\nroot=zenith-fs\n";
+    let manifest = concat!("Zenith OS v", env!("CARGO_PKG_VERSION"), "\ninstalled-by=setup\nroot=zenith-fs\n").as_bytes();
     fs.write(inode, manifest).map_err(map_error)?;
     fs.flush().map_err(map_error)?;
     Ok(())

@@ -5,6 +5,39 @@ use core::ptr::read_unaligned;
 use crate::diagnostics;
 
 const RSDP_SIGNATURE: &[u8; 8] = b"RSD PTR ";
+mod power;
+
+/// Prefer firmware S5, then try the virtual-machine power controls.
+pub fn shutdown() -> ! {
+    diagnostics::println("Shutting down Zenith OS. You may turn off the computer.");
+    crate::wm::render_now();
+    unsafe {
+        core::arch::asm!("cli");
+        power::off();
+        if crate::display::available() {
+            crate::io::outw(0x604, 0x2000); // QEMU / modern Bochs
+            crate::io::outw(0xB004, 0x2000); // older Bochs
+            crate::io::outw(0x4004, 0x3400); // VirtualBox
+        }
+        loop { core::arch::asm!("hlt"); }
+    }
+}
+
+pub fn restart() -> ! {
+    diagnostics::println("Restarting Zenith OS.");
+    unsafe {
+        core::arch::asm!("cli");
+        power::reset();
+        for _ in 0..100_000 {
+            if crate::io::inb(0x64) & 2 == 0 {
+                crate::io::outb(0x64, 0xFE);
+                break;
+            }
+        }
+        crate::io::outb(0xCF9, 0x06);
+        loop { core::arch::asm!("hlt"); }
+    }
+}
 
 #[repr(C, packed)]
 struct Rsdp {
@@ -73,5 +106,6 @@ fn report(address: usize) -> bool {
     diagnostics::puts(" rsdt=");
     diagnostics::put_hex(rsdp.rsdt_address as u64);
     diagnostics::puts("\n");
+    power::discover(address,rsdp.revision,rsdp.rsdt_address);
     true
 }

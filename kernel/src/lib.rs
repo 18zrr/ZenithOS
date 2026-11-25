@@ -239,12 +239,19 @@ pub unsafe extern "C" fn bcmp(
     left: *const core::ffi::c_void,
     right: *const core::ffi::c_void,
     count: usize,
+) -> i32 { memcmp(left,right,count) }
+
+#[no_mangle]
+pub unsafe extern "C" fn memcmp(
+    left: *const core::ffi::c_void,
+    right: *const core::ffi::c_void,
+    count: usize,
 ) -> i32 {
     let left = left as *const u8;
     let right = right as *const u8;
     for index in 0..count {
         if *left.add(index) != *right.add(index) {
-            return 1;
+            return *left.add(index) as i32 - *right.add(index) as i32;
         }
     }
     0

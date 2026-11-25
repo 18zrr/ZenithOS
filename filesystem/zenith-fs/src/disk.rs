@@ -290,8 +290,8 @@ impl<B: BlockDevice> ZenithFs<B> {
             for_each_extent(&root, &mut self.device, &mut |visit| {
                 match visit {
                     ExtentVisit::Leaf(extent) => {
-                        if (extent.physical as usize) < allocated.len() {
-                            allocated[extent.physical as usize] = true;
+                        for block in extent.physical..extent.physical.saturating_add(extent.count as u64).min(allocated.len() as u64) {
+                            allocated[block as usize] = true;
                         }
                     }
                     ExtentVisit::Node(block) => {
@@ -488,6 +488,30 @@ impl<B: BlockDevice> ZenithFs<B> {
         self.create_at(ROOT_INODE, name, is_directory)
     }
 
+    /// Rename one entry in place, preserving its inode and directory children.
+    pub fn rename(&mut self, path: &str, name: &str) -> Result<(), FsError> {
+        if name.is_empty() || name.len() > 56 || name.contains('/') || name.contains('\0')
+            || name == "." || name == ".." { return Err(FsError::InvalidPath); }
+        let (dir, old) = path.rsplit_once('/').unwrap_or(("", path));
+        let parent = self.resolve(dir)?;
+        let inode = self.inodes[parent as usize];
+        if !self.may(&inode, Access::Write) || !self.may(&inode, Access::Execute) {
+            return Err(FsError::PermissionDenied);
+        }
+        let mut data = self.read_directory(parent)?;
+        let mut slot = None;
+        for (i, bytes) in data.chunks_exact(64).enumerate() {
+            let entry = unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const OnDiskDirEntry) };
+            if entry.inode == 0 { continue; }
+            if entry.name() == name.as_bytes() { return Err(FsError::InvalidPath); }
+            if entry.name() == old.as_bytes() { slot = Some(i * 64); }
+        }
+        let offset = slot.ok_or(FsError::FileNotFound)?;
+        data[offset..offset+56].fill(0);
+        data[offset..offset+name.len()].copy_from_slice(name.as_bytes());
+        self.write_directory(parent, &data)
+    }
+
     // ---- file operations ---------------------------------------------------
 
     /// Write data to a file inode, replacing its contents.
@@ -593,6 +617,10 @@ impl<B: BlockDevice> ZenithFs<B> {
 
     pub fn unlink(&mut self, path: &str) -> Result<(), FsError> {
         let inode_number = self.resolve(path)?;
+        if inode_number == ROOT_INODE { return Err(FsError::InvalidPath); }
+        if self.stat(inode_number)?.1 && !self.list(path)?.is_empty() {
+            return Err(FsError::DirectoryNotEmpty);
+        }
         let trimmed = path.trim_matches('/');
         let parent_path = match trimmed.rfind('/') { Some(i) => &trimmed[..i], None => "" };
         let parent = if parent_path.is_empty() { ROOT_INODE } else { self.resolve(parent_path)? };
@@ -920,6 +948,24 @@ mod tests {
         let mut fs = ZenithFs::mount(device).unwrap();
         fs.create("data", false).unwrap();
         assert_eq!(fs.create("data", false), Err(FsError::InvalidPath));
+    }
+
+    #[test]
+    fn renaming_a_folder_keeps_children_and_refuses_collisions() {
+        let mut device = memory(128);
+        ZenithFs::format(&mut device).unwrap();
+        let mut fs = ZenithFs::mount(device).unwrap();
+        fs.create_path("/docs", true).unwrap();
+        let id = fs.create_path("/docs/notes", false).unwrap();
+        fs.write(id,b"meeting notes").unwrap();
+        fs.create_path("/other", false).unwrap();
+        assert_eq!(fs.rename("/docs","other"),Err(FsError::InvalidPath));
+        assert_eq!(fs.unlink("/docs"),Err(FsError::DirectoryNotEmpty));
+        fs.rename("/docs","archive").unwrap();
+        let mut fs = ZenithFs::mount(fs.device).unwrap();
+        assert_eq!(fs.resolve("/docs"),Err(FsError::FileNotFound));
+        assert_eq!(fs.resolve("/archive/notes"),Ok(id));
+        assert_eq!(fs.read(id).unwrap(),b"meeting notes");
     }
 
     #[test]

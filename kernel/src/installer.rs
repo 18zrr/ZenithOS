@@ -37,7 +37,7 @@ fn render_sidebar(step: usize, width: usize, height: usize) {
     fb::fill_rect(0, 0, width, 48, PANEL);
     fb::fill_rect(24, 17, 3, 16, ACCENT);
     fb::text(40, 14, "Zenith  /  System setup", FG);
-    fb::text(width - 96, 16, "v0.3.0", MUTED);
+    fb::text(width - 96, 16, concat!("v", env!("CARGO_PKG_VERSION")), MUTED);
 
     let rail = sidebar_width(width);
     fb::fill_rect(0, 48, rail, height.saturating_sub(104), PANEL);
@@ -81,7 +81,7 @@ fn render(step: usize, selection: usize, progress: usize, result: Option<bool>) 
         0 => {
             fb::text(x, y, "Welcome to Zenith OS", FG);
             y += 40;
-            fb::text(x, y, "This wizard will install Zenith OS v0.3.0", MUTED);
+            fb::text(x, y, concat!("This wizard will install Zenith OS v", env!("CARGO_PKG_VERSION")), MUTED);
             y += 24;
             fb::text(x, y, "on your computer.", MUTED);
             y += 56;

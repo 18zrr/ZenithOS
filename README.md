@@ -1,4 +1,4 @@
-# Zenith OS - Project Specification and Status
+# Zenith OS 0.3.1 — Nightfall
 
 Zenith OS is an independent x86_64 operating system written in Rust, with
 assembly for the boot entry points. It uses a custom monolithic kernel, a
@@ -22,14 +22,15 @@ All crates are members of one Cargo workspace rooted at `Cargo.toml`.
 
 ## Desktop
 
-The framebuffer desktop uses the **Afterglow** dark theme. A cached landscape
-wallpaper, windows, the taskbar and the mouse cursor are
+The framebuffer desktop uses the **Afterglow** dark theme with the **Nightfall**
+landscape: a moonlit alpine lake with reflected ridgelines. The cached wallpaper,
+windows, the taskbar and the mouse cursor are
 composed into a full-screen RAM buffer and then blitted to the framebuffer, so
 redraws do not flicker.
 
-[Desktop preview: Afterglow in QEMU](docs/afterglow-desktop.png)
+[Desktop preview: Nightfall in QEMU](docs/nightfall-desktop.png)
 
-- **Windows**: Terminal, System Monitor, Settings, About and Browser. Every window has a
+- **Windows**: Terminal, File Manager, System Monitor, Settings, About and Browser. Every window has a
   title bar, app icon, minimise / maximise / close controls, a drop shadow when
   floating, and a bottom-right resize grip.
 - **Mouse**: PS/2 mouse on IRQ12 and a USB HID boot-protocol mouse on UHCI.
@@ -45,6 +46,32 @@ redraws do not flicker.
 - **Start menu**: click Start or press **F1**. Type to filter apps, use the
   arrow keys to move, **Enter** to launch and **Esc** to close; clicking outside
   the panel also closes it. The Installer entry opens the graphical wizard.
+- **Session controls**: the launcher's mint, lilac and apricot buttons provide
+  **Log out**, **Restart** and **Shut down**. Log out closes desktop windows and
+  shows a welcome screen; click **Enter workspace** or press **Enter** to return.
+  Press **Tab** (or **Shift+Tab**) to focus a session button, **Left/Right** to
+  choose one and **Enter** to activate it. Logging out clears the terminal and
+  its command history. The host browser companion is separate and stays running.
+  Power controls try firmware ACPI S5 and reset registers on supported
+  System I/O platforms, with VM and legacy fallbacks.
+- **File Manager**: open Start and search `file`. Select an entry, then **Open**
+  (or **Enter**) to browse a folder or preview a file. Use **Up** or **Backspace**
+  for the parent folder. Create files (`N`) and folders (`D`), rename (`F2`),
+  copy a file in the same folder (`C`, up to 256 KiB), or delete (`Delete`).
+  Enter the name and press **Enter**, or **Esc** to cancel. A non-empty folder
+  must be emptied before deletion.
+- **Persistent preferences**: Settings saves accent, landscape/gradient wallpaper,
+  and applied resolution to `desktop.prefs` on Zenith FS. Safe graphics skips
+  the saved mode. Without a writable disk, changes last for the session only.
+
+For a persistent QEMU desktop, create a **new** data disk once, then use the
+same image on subsequent boots:
+
+```sh
+qemu-img create -f raw zenith-data.img 64M
+qemu-system-x86_64 -m 512 -boot d -cdrom zenith.iso \
+  -drive file=zenith-data.img,format=raw,if=ide,index=0
+```
 - **Keyboard focus**: the Start menu, active Browser window and Settings
   resolution field receive their own input. Otherwise typing brings the
   Terminal forward. **F12** cycles display orientation.

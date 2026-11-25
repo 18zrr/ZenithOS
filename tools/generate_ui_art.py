@@ -21,7 +21,7 @@ def typeface():
 def icons():
     # 32-unit viewbox, supersampled for legibility even in a title bar.
     data = bytearray()
-    for name in ("terminal", "monitor", "settings", "about", "installer", "browser"):
+    for name in ("terminal", "monitor", "settings", "about", "installer", "browser", "files"):
         image = Image.new("L", (128, 128))
         d = ImageDraw.Draw(image)
 
@@ -50,6 +50,9 @@ def icons():
         elif name == "installer":
             line((16, 5), (16, 19)); line((10, 14), (16, 20), (22, 14))
             line((6, 21), (6, 26), (26, 26), (26, 21))
+        elif name == "files":
+            line((4, 24), (4, 8), (13, 8), (16, 11), (28, 11), (28, 24), (4, 24))
+            line((5, 14), (27, 14))
         else:
             oval(16, 16, 11); oval(16, 16, 5, 11)
             line((5, 16), (27, 16))

@@ -9,6 +9,9 @@
 //! minimise/maximise/close, use the taskbar and the Start menu.
 
 use core::mem;
+mod files;
+mod prefs;
+mod nightfall;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::vec;
@@ -75,6 +78,7 @@ const ACCENTS: [u32; 4] = [Theme::DARK.accent, 0x0085_DDD0, 0x008D_BDFF, 0x00FF_
 const ACCENT_NAMES: [&str; 4] = ["Lilac", "Mint", "Sky", "Apricot"];
 
 static DIRTY: AtomicBool = AtomicBool::new(false);
+static LOGGED_OUT: AtomicBool = AtomicBool::new(false);
 static SAFE_MODE: AtomicBool = AtomicBool::new(false);
 static NEXT_FRAME: AtomicU64 = AtomicU64::new(0);
 static NEXT_BROWSER_CHECK: AtomicU64 = AtomicU64::new(0);
@@ -83,6 +87,7 @@ static LAST_MINUTE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WindowKind {
+    Files,
     Browser,
     Terminal,
     Monitor,
@@ -93,6 +98,7 @@ pub enum WindowKind {
 impl WindowKind {
     fn title(self) -> &'static str {
         match self {
+            WindowKind::Files => "File Manager",
             WindowKind::Browser => "Browser - Chromium companion",
             WindowKind::Terminal => "Terminal",
             WindowKind::Monitor => "System Monitor",
@@ -108,12 +114,14 @@ impl WindowKind {
             WindowKind::Settings => 2,
             WindowKind::About => 3,
             WindowKind::Browser => 5,
+            WindowKind::Files => 6,
         }
     }
 }
 
-const TASKBAR_KINDS: [WindowKind; 4] = [
+const TASKBAR_KINDS: [WindowKind; 5] = [
     WindowKind::Terminal,
+    WindowKind::Files,
     WindowKind::Monitor,
     WindowKind::Settings,
     WindowKind::About,
@@ -163,6 +171,8 @@ struct Resize {
 }
 
 struct Wm {
+    files: files::Files,
+    prefs: prefs::Prefs,
     initialized: bool,
     width: usize,
     height: usize,
@@ -186,6 +196,8 @@ struct Wm {
 impl Wm {
     const fn new() -> Self {
         Wm {
+            files: files::Files::new(),
+            prefs: prefs::Prefs::DEFAULT,
             initialized: false,
             width: 0,
             height: 0,
@@ -210,11 +222,28 @@ impl Wm {
 
 static WM: crate::sync::SpinLock<Wm> = crate::sync::SpinLock::new(Wm::new());
 
+fn welcome_button(width: usize, height: usize) -> Rect {
+    Rect::new(width as i32/2-110, height as i32/2+20, 220, 44)
+}
+
+pub fn welcome_key(event: KeyEvent) -> bool {
+    if !LOGGED_OUT.load(Ordering::Acquire) { return false; }
+    if event.pressed && event.key == Key::Enter {
+        LOGGED_OUT.store(false, Ordering::Release);
+        WM.lock().open_window(WindowKind::Terminal);
+        invalidate();
+    }
+    true
+}
+
 /// An action that must run outside the window-manager lock.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    Logout,
     None,
     Installer,
+    Shutdown,
+    Restart,
     /// Apply a live display mode outside the window-manager lock.
     DisplayMode(usize, usize),
 }
@@ -614,6 +643,10 @@ pub fn invalidate() {
 
 /// Allocate the compositor surfaces and open the initial terminal window.
 pub fn init() {
+    let prefs = prefs::Prefs::load();
+    if !safe_mode() && prefs.width != 0 {
+        let _ = display::set_mode(prefs.width as usize, prefs.height as usize);
+    }
     let (width, height) = fb::dimensions();
     if width == 0 || height == 0 {
         return;
@@ -627,8 +660,10 @@ pub fn init() {
     }
     wm.width = width;
     wm.height = height;
+    wm.prefs = prefs;
+    wm.accent = ACCENTS[prefs.accent as usize];
     wm.wallpaper = vec![0u32; MAX_SURFACE_PIXELS];
-    fill_wallpaper(&mut wm.wallpaper, width, height);
+    fill_wallpaper(&mut wm.wallpaper, width, height, prefs.gradient);
     wm.frame = vec![0u32; MAX_SURFACE_PIXELS];
     let pixels = width.saturating_mul(height);
     let wallpaper = mem::take(&mut wm.wallpaper);
@@ -678,6 +713,9 @@ pub fn apply_display(width: usize, height: usize) -> Result<(), &'static str> {
                 text.push(b'x');
                 text.push_dec(height as u64);
                 wm.set_display_status(text.as_str());
+                wm.prefs.width = width as u16;
+                wm.prefs.height = height as u16;
+                wm.save_preferences();
             }
             drop(wm);
             invalidate();
@@ -710,7 +748,8 @@ fn on_display_change(width: usize, height: usize) {
     }
     wm.width = width;
     wm.height = height;
-    fill_wallpaper(&mut wm.wallpaper, width, height);
+    let gradient = wm.prefs.gradient;
+    fill_wallpaper(&mut wm.wallpaper, width, height, gradient);
     let wallpaper = mem::take(&mut wm.wallpaper);
     wm.frame[..pixels].copy_from_slice(&wallpaper[..pixels]);
     wm.wallpaper = wallpaper;
@@ -870,6 +909,7 @@ pub fn tick() {
 
 /// Toggle the Start menu (F1 or the taskbar button).
 pub fn toggle_menu() {
+    if LOGGED_OUT.load(Ordering::Acquire) { return; }
     if !initialized() {
         return;
     }
@@ -884,6 +924,29 @@ pub fn menu_key(event: KeyEvent) -> Action {
         return Action::None;
     }
 
+    let session = start_menu::session();
+    if event.key == Key::Tab {
+        let next = match (session,event.shift) {
+            (None,false) => Some(0), (None,true) => Some(2),
+            (Some(2),false) | (Some(0),true) => None,
+            (Some(i),true) => Some(i-1), (Some(i),false) => Some(i+1),
+        };
+        start_menu::focus_session(next);
+        invalidate();
+        return Action::None;
+    }
+    if let Some(i) = session {
+        match event.key {
+            Key::Left => start_menu::focus_session(Some((i+2)%3)),
+            Key::Right => start_menu::focus_session(Some((i+1)%3)),
+            Key::Up => start_menu::focus_session(None),
+            Key::Enter if !event.repeat => return WM.lock().session_action(i),
+            Key::Escape => start_menu::close(),
+            _ => {}
+        }
+        invalidate();
+        return Action::None;
+    }
     match event.key {
         Key::Escape => {
             start_menu::close();
@@ -891,12 +954,12 @@ pub fn menu_key(event: KeyEvent) -> Action {
             Action::None
         }
         Key::Up => {
-            start_menu::move_selection(-2);
+            start_menu::move_selection(-(MenuLayout::columns(WM.lock().width) as isize));
             invalidate();
             Action::None
         }
         Key::Down => {
-            start_menu::move_selection(2);
+            start_menu::move_selection(MenuLayout::columns(WM.lock().width) as isize);
             invalidate();
             Action::None
         }
@@ -1014,6 +1077,15 @@ pub fn pump() -> Action {
 
     let mut action = Action::None;
     while let Some(event) = mouse::take_event() {
+        if LOGGED_OUT.load(Ordering::Acquire) {
+            if event.kind == mouse::EVENT_BUTTON_DOWN && event.button == mouse::BUTTON_LEFT
+                && welcome_button(wm.width, wm.height).contains(event.x, event.y) {
+                LOGGED_OUT.store(false, Ordering::Release);
+                wm.open_window(WindowKind::Terminal);
+            }
+            invalidate();
+            continue;
+        }
         if wm.browser_pointer(event) { continue; }
         match event.kind {
             mouse::EVENT_MOVE => {
@@ -1036,6 +1108,8 @@ pub fn pump() -> Action {
                         let w = wm.windows[i].as_mut().unwrap();
                         if w.kind == WindowKind::Terminal {
                             fb::scroll_lines(event.scroll * 3);
+                        } else if w.kind == WindowKind::Files {
+                            wm.files.wheel(event.scroll);
                         } else {
                             w.scroll = (w.offset()-event.scroll*42).clamp(0,w.max_scroll() as i32) as usize;
                         }
@@ -1045,7 +1119,7 @@ pub fn pump() -> Action {
             }
             _ => {}
         }
-        if action == Action::Installer {
+        if action != Action::None {
             break;
         }
     }
@@ -1084,10 +1158,23 @@ fn render() {
     frame[..pixels].copy_from_slice(&wm.wallpaper[..pixels]);
 
     let (mouse_x, mouse_y) = mouse::position();
+    if LOGGED_OUT.load(Ordering::Acquire) {
+        let cx = stride as i32 / 2;
+        let cy = height as i32 / 2;
+        rounded_rect(&mut frame, stride, height, cx-211, cy-137, 422, 247, 24, BORDER_ACTIVE);
+        rounded_rect(&mut frame, stride, height, cx-210, cy-136, 420, 245, 23, WINDOW_BG);
+        logo::draw(&mut frame,stride,height,cx-26,cy-126,52);
+        draw_text_centered(&mut frame, stride, height, cx, cy-70, "Welcome to Zenith", FG);
+        draw_text_centered(&mut frame, stride, height, cx, cy-30, "Workspace closed. Ready for a fresh start.", MUTED);
+        let r = welcome_button(stride, height);
+        rounded_rect(&mut frame, stride, height, r.x, r.y, r.w, r.h, 16, wm.accent);
+        draw_text_centered(&mut frame, stride, height, cx, r.y+12, "Enter workspace", WINDOW_BG);
+    } else {
     wm.draw_windows(&mut frame, mouse_x, mouse_y);
     wm.draw_taskbar(&mut frame, mouse_x, mouse_y);
     if start_menu::is_open() {
         wm.draw_start_menu(&mut frame, mouse_x, mouse_y);
+    }
     }
     draw_cursor(&mut frame, wm.width, wm.height, mouse_x, mouse_y);
 
@@ -1126,6 +1213,29 @@ fn render() {
 }
 
 impl Wm {
+    fn save_preferences(&mut self) {
+        self.set_display_status(if self.prefs.save().is_ok() { "Preferences saved to disk" }
+            else { "Session only: preferences could not be saved" });
+    }
+
+    fn session_action(&mut self, index: usize) -> Action {
+        start_menu::close();
+        invalidate();
+        match index {
+            0 => {
+                self.windows = [None; MAX_WINDOWS];
+                self.order_len = 0;
+                self.files = files::Files::new();
+                self.display_input_active = false;
+                self.browser_buttons = 0;
+                LOGGED_OUT.store(true, Ordering::Release);
+                Action::Logout
+            }
+            1 => Action::Restart,
+            _ => Action::Shutdown,
+        }
+    }
+
     fn find(&self, kind: WindowKind) -> Option<usize> {
         self.windows
             .iter()
@@ -1230,7 +1340,7 @@ impl Wm {
                 560usize.min(self.width.saturating_sub(100)).max(380),
                 460usize.min(available_h.saturating_sub(60)).max(300),
             ),
-            WindowKind::Settings => (
+            WindowKind::Files | WindowKind::Settings => (
                 600usize.min(self.width.saturating_sub(100)).max(380),
                 580usize.min(available_h.saturating_sub(20)).max(320),
             ),
@@ -1343,6 +1453,7 @@ impl Wm {
 
         if start_menu::is_open() {
             match hit {
+                Hit::Session(index) => return self.session_action(index),
                 Hit::MenuApp(app) => {
                     start_menu::select_app(app);
                     start_menu::close();
@@ -1387,6 +1498,7 @@ impl Wm {
                         self.focus_index(index);
                     }
                 } else {
+                    if kind == WindowKind::Files { self.files.refresh(); }
                     self.open_window(kind);
                 }
                 invalidate();
@@ -1454,10 +1566,21 @@ impl Wm {
             }
             Hit::Body(index) => {
                 self.focus_index(index);
+                if let Some(w) = self.windows[index] {
+                    if w.kind == WindowKind::Files { self.files.click(&w,x,y); }
+                }
                 invalidate();
             }
             Hit::Swatch(swatch) => {
                 self.accent = ACCENTS[swatch.min(ACCENTS.len() - 1)];
+                self.prefs.accent = swatch as u8;
+                self.save_preferences();
+                invalidate();
+            }
+            Hit::Wallpaper => {
+                self.prefs.gradient = !self.prefs.gradient;
+                fill_wallpaper(&mut self.wallpaper, self.width, self.height, self.prefs.gradient);
+                self.save_preferences();
                 invalidate();
             }
             Hit::DisplayPreset(index) => {
@@ -1499,7 +1622,7 @@ impl Wm {
                 invalidate();
                 return self.launch(app);
             }
-            Hit::MenuInside | Hit::Taskbar | Hit::Desktop => {}
+            Hit::Session(_) | Hit::MenuInside | Hit::Taskbar | Hit::Desktop => {}
         }
         Action::None
     }
@@ -1524,6 +1647,7 @@ impl Wm {
             3 => self.open_window(WindowKind::About),
             4 => return Action::Installer,
             5 => self.open_window(WindowKind::Browser),
+            6 => { self.files.refresh(); self.open_window(WindowKind::Files); }
             _ => {}
         }
         invalidate();
@@ -1534,6 +1658,9 @@ impl Wm {
         if start_menu::is_open() {
             let menu = MenuLayout::new(self.width, self.height);
             if menu.panel.contains(x, y) {
+                for (index, rect) in menu.session.iter().enumerate() {
+                    if rect.contains(x, y) { return Hit::Session(index); }
+                }
                 for entry in 0..menu.count {
                     if menu.tiles[entry].contains(x, y) {
                         return Hit::MenuApp(menu.apps[entry]);
@@ -1585,6 +1712,7 @@ impl Wm {
             }
             if window.kind == WindowKind::Settings {
                 let y = y + window.offset();
+                if wallpaper_button(&window).contains(x,y) { return Hit::Wallpaper; }
                 if let Some(swatch) = settings_swatch_at(&window, x, y) {
                     return Hit::Swatch(swatch);
                 }
@@ -1636,7 +1764,7 @@ impl Wm {
         if !window.maximized && !safe_mode() {
             soft_shadow(frame, stride, height, x, y, w, h);
         }
-        let border = if active { BORDER_ACTIVE } else { BORDER_IDLE };
+        let border = if active { blend(BORDER_ACTIVE,self.accent,80) } else { BORDER_IDLE };
         rounded_rect(frame, stride, height, x, y, w, h, 12, border);
         let title_bg = if active { TITLE_ACTIVE } else { TITLE_IDLE };
         rounded_rect(frame, stride, height, x + 1, y + 1, w - 2, h - 2, 11, title_bg);
@@ -1774,6 +1902,7 @@ impl Wm {
         }
 
         match window.kind {
+            WindowKind::Files => self.files.draw(frame,stride,height,window),
             WindowKind::Browser => {
                 let r = browser_view(window);
                 if !browser::draw(frame, stride, height, r.x, r.y, r.w, r.h) {
@@ -2092,6 +2221,10 @@ impl Wm {
         self.monitor_row(frame, label_x, y + 66, max_x, "Accent", accent.as_str());
 
         let swatches = settings_swatches(window);
+        let r = wallpaper_button(window);
+        rounded_rect(frame,stride,height,r.x,r.y,r.w,r.h,5,MENU_TILE_SELECTED);
+        draw_text_centered(frame,stride,height,r.x+r.w as i32/2,r.y+1,
+            if self.prefs.gradient { "Gradient" } else { "Landscape" },FG);
         for (index, swatch) in swatches.iter().enumerate() {
             let selected = ACCENTS[index] == self.accent;
             let border = if selected { FG } else { 0x004A_5B70 };
@@ -2338,25 +2471,19 @@ impl Wm {
         let top = window.y + TITLEBAR_H as i32 + 12;
         let max_x = window.x + window.w as i32 - 24;
 
-        // The brand mark anchors the window; text follows beneath it.
-        logo::draw(
-            frame,
-            stride,
-            height,
-            center - 32,
-            top,
-            64,
-        );
+        // A compact identity card with a separate system details section.
+        rounded_rect(frame,stride,height,x,top,window.w-48,124,14,TITLE_ACTIVE);
+        logo::draw(frame,stride,height,center-29,top+2,58);
         let y = top + 78;
-        draw_text_centered(frame, stride, height, center, y, "ZENITH OS", self.accent);
-        draw_text_centered(frame, stride, height, center, y + 26, "Version 0.3.0", FG);
+        draw_text_centered(frame,stride,height,center,y-19,"Zenith OS   /   Nightfall",FG);
+        draw_text_centered(frame,stride,height,center,y+10,concat!("Version ", env!("CARGO_PKG_VERSION")),self.accent);
         draw_text_centered(
             frame,
             stride,
             height,
             center,
             y + 52,
-            "Independent x86_64 operating system",
+            "SYSTEM DETAILS",
             MUTED,
         );
 
@@ -2496,9 +2623,9 @@ impl Wm {
                     frame,
                     stride,
                     height,
-                    rect.x + 22,
+                    rect.x + if focused {16} else {22},
                     rect.y + 45,
-                    8,
+                    if focused {20} else {8},
                     4,
                     2,
                     indicator,
@@ -2508,7 +2635,7 @@ impl Wm {
         }
 
         // Separator between the launcher cluster and the tray.
-        let separator_x = layout.apps[3].x + 52 + 12;
+        let separator_x = layout.apps[4].x + 52 + 12;
         fill(
             frame,
             stride,
@@ -2559,17 +2686,7 @@ impl Wm {
         let menu = MenuLayout::new(self.width, self.height);
         let panel = menu.panel;
 
-        rounded_rect(
-            frame,
-            stride,
-            height,
-            panel.x + 7,
-            panel.y + 9,
-            panel.w,
-            panel.h,
-            13,
-            SHADOW,
-        );
+        if !safe_mode() { soft_shadow(frame,stride,height,panel.x,panel.y,panel.w,panel.h); }
         rounded_rect(
             frame,
             stride,
@@ -2593,7 +2710,8 @@ impl Wm {
             MENU_BG,
         );
 
-        logo::draw(frame, stride, height, panel.x + 20, panel.y + 10, 28);
+        rounded_rect(frame,stride,height,panel.x+8,panel.y+8,panel.w-16,43,10,TITLE_ACTIVE);
+        logo::draw(frame, stride, height, panel.x + 16, panel.y + 10, 36);
         draw_text(
             frame,
             stride,
@@ -2601,7 +2719,7 @@ impl Wm {
             panel.x + 56,
             panel.y + 18,
             panel.right(),
-            "Applications",
+            "Nightfall   /   Launchpad",
             FG,
         );
         draw_text(
@@ -2611,13 +2729,13 @@ impl Wm {
             panel.right() - 24 - 10 * COL_PITCH as i32,
             panel.y + 20,
             panel.right() - 16,
-            "Zenith 0.2",
+            concat!("Zenith ", env!("CARGO_PKG_VERSION")),
             DIM,
         );
 
         // Search field.
         let search = menu.search;
-        fill(
+        rounded_rect(
             frame,
             stride,
             height,
@@ -2625,18 +2743,9 @@ impl Wm {
             search.y,
             search.w,
             search.h,
-            SEARCH_BG,
+            10, blend(MENU_BORDER,self.accent,58),
         );
-        fill(
-            frame,
-            stride,
-            height,
-            search.x,
-            search.y + search.h as i32 - 1,
-            search.w,
-            1,
-            self.accent,
-        );
+        rounded_rect(frame,stride,height,search.x+1,search.y+1,search.w-2,search.h-2,9,SEARCH_BG);
         // Magnifier.
         let glass_x = search.x + 20;
         let glass_y = search.y + 15;
@@ -2727,9 +2836,12 @@ impl Wm {
             panel.x + 24,
             panel.y + 108,
             panel.right(),
-            "Installed apps",
+            "Applications",
             MUTED,
         );
+        let hint = "Tab: session controls";
+        let right = panel.right()-24;
+        draw_text(frame,stride,height,right-ui_art::text_width(hint),panel.y+108,right,hint,DIM);
 
         if menu.count == 0 {
             draw_text(
@@ -2744,7 +2856,7 @@ impl Wm {
             );
         }
 
-        let selected = start_menu::selection();
+        let selected = if start_menu::session().is_none() { start_menu::selection() } else { usize::MAX };
         for entry in 0..menu.count {
             let rect = menu.tiles[entry];
             let app = menu.apps[entry];
@@ -2767,7 +2879,10 @@ impl Wm {
                 8,
                 background,
             );
-            app_icon(frame, stride, height, rect.x+14, rect.y+(rect.h as i32-32)/2, 32, app);
+            let stacked = rect.h >= 70;
+            let icon_x = if stacked { rect.x+(rect.w as i32-38)/2 } else { rect.x+14 };
+            let size = if stacked { 38 } else { 32 };
+            app_icon(frame,stride,height,icon_x,if stacked {rect.y+7} else {rect.y+(rect.h as i32-32)/2},size,app);
             if entry == selected {
                 rounded_rect(frame, stride, height, rect.x, rect.y+(rect.h as i32-20)/2, 3, 20, 1, self.accent);
             }
@@ -2775,15 +2890,15 @@ impl Wm {
                 frame,
                 stride,
                 height,
-                rect.x + 54,
-                rect.y + (rect.h as i32 - 20)/2,
+                if stacked { rect.x+(rect.w as i32-ui_art::text_width(start_menu::APPS[app].0))/2 } else { rect.x+54 },
+                if stacked { rect.y+rect.h as i32-26 } else { rect.y+(rect.h as i32-20)/2 },
                 rect.right() - 8,
                 start_menu::APPS[app].0,
                 FG,
             );
         }
 
-        let footer_y = panel.y + panel.h as i32 - 40;
+        let footer_y = panel.y + panel.h as i32 - 58;
         fill(
             frame,
             stride,
@@ -2794,26 +2909,18 @@ impl Wm {
             1,
             MENU_BORDER,
         );
-        draw_text(
-            frame,
-            stride,
-            height,
-            panel.x + 24,
-            footer_y + 12,
-            panel.right() - 20,
-            "F1 close",
-            DIM,
-        );
-        draw_text(
-            frame,
-            stride,
-            height,
-            panel.right() - 24 - 10 * COL_PITCH as i32,
-            footer_y + 12,
-            panel.right() - 20,
-            "Enter open",
-            DIM,
-        );
+        for (i, label) in ["Log out", "Restart", "Shut down"].iter().enumerate() {
+            let r = menu.session[i];
+            let tint = [0x0085_DDD0, self.accent, 0x00FF_BA8C][i];
+            let hovered = r.contains(mouse_x, mouse_y) || start_menu::session() == Some(i);
+            if start_menu::session() == Some(i) {
+                rounded_rect(frame,stride,height,r.x-2,r.y-2,r.w+4,r.h+4,16,tint);
+            }
+            rounded_rect(frame, stride, height, r.x, r.y, r.w, r.h, 14,
+                blend(WINDOW_BG, tint, if hovered { 80 } else { 28 }));
+            rounded_rect(frame, stride, height, r.x+10, r.y+14, 3, 12, 1, tint);
+            draw_text_centered(frame, stride, height, r.x+r.w as i32/2+4, r.y+10, label, tint);
+        }
     }
 }
 
@@ -2822,6 +2929,8 @@ impl Wm {
 // ---------------------------------------------------------------------------
 
 enum Hit {
+    Wallpaper,
+    Session(usize),
     StartButton,
     TaskbarApp(usize),
     Taskbar,
@@ -2844,13 +2953,13 @@ enum Hit {
 struct TaskbarLayout {
     panel: Rect,
     start: Rect,
-    apps: [Rect; 4],
+    apps: [Rect; TASKBAR_KINDS.len()],
 }
 
 impl TaskbarLayout {
     fn new(width: usize, height: usize) -> Self {
         let panel_y = height.saturating_sub(DOCK_H + DOCK_MARGIN) as i32;
-        let panel_w = 430usize.min(width.saturating_sub(24));
+        let panel_w = 484usize.min(width.saturating_sub(24));
         let panel_x = (width.saturating_sub(panel_w) / 2) as i32;
         let item = 52;
         let row_y = panel_y + (DOCK_H as i32 - item as i32) / 2;
@@ -2858,17 +2967,13 @@ impl TaskbarLayout {
         TaskbarLayout {
             panel: Rect::new(panel_x, panel_y, panel_w, DOCK_H),
             start: Rect::new(group_x, row_y, item as usize, item as usize),
-            apps: [
-                Rect::new(group_x + 54, row_y, item as usize, item as usize),
-                Rect::new(group_x + 108, row_y, item as usize, item as usize),
-                Rect::new(group_x + 162, row_y, item as usize, item as usize),
-                Rect::new(group_x + 216, row_y, item as usize, item as usize),
-            ],
+            apps: core::array::from_fn(|i| Rect::new(group_x+54*(i as i32+1),row_y,item,item)),
         }
     }
 }
 
 struct MenuLayout {
+    session: [Rect; 3],
     panel: Rect,
     search: Rect,
     tiles: [Rect; start_menu::APP_COUNT],
@@ -2877,20 +2982,23 @@ struct MenuLayout {
 }
 
 impl MenuLayout {
+    fn columns(width:usize) -> usize { if width>=900 {3} else {2} }
     fn new(width: usize, height: usize) -> Self {
-        let panel_w = 470usize.min(width.saturating_sub(24));
-        let panel_h = 440usize.min(height.saturating_sub(TASKBAR_H + 24));
+        let cols = Self::columns(width);
+        let panel_w = (if cols==3 {548usize} else {470}).min(width.saturating_sub(24));
+        let panel_h = 466usize.min(height.saturating_sub(TASKBAR_H + 24));
         let panel_x = (width.saturating_sub(panel_w) / 2) as i32;
         let panel_y = (height.saturating_sub(TASKBAR_H + 8 + panel_h)) as i32;
         let mut apps = [0usize; start_menu::APP_COUNT];
         let count = start_menu::visible(&mut apps);
         let mut tiles = [Rect::new(0, 0, 0, 0); start_menu::APP_COUNT];
-        let gap = 12usize;
-        let tile_w = panel_w.saturating_sub(40 + gap) / 2;
-        let tile_h = 62.min(panel_h.saturating_sub(138 + 52 + 2*gap) / 3);
+        let gap = 6usize;
+        let tile_w = panel_w.saturating_sub(40 + (cols-1)*gap) / cols;
+        let rows = start_menu::APP_COUNT.div_ceil(cols);
+        let tile_h = 88.min(panel_h.saturating_sub(138 + 62 + (rows-1)*gap) / rows);
         for entry in 0..count {
-            let column = entry % 2;
-            let row = entry / 2;
+            let column = entry % cols;
+            let row = entry / cols;
             tiles[entry] = Rect::new(
                 panel_x + 20 + (column * (tile_w + gap)) as i32,
                 panel_y + 138 + (row * (tile_h + gap)) as i32,
@@ -2899,8 +3007,12 @@ impl MenuLayout {
             );
         }
         MenuLayout {
+            session: core::array::from_fn(|i| {
+                let w = (panel_w-60)/3;
+                Rect::new(panel_x+20+(i*(w+10)) as i32, panel_y+panel_h as i32-49, w, 40)
+            }),
             panel: Rect::new(panel_x, panel_y, panel_w, panel_h),
-            search: Rect::new(panel_x + 20, panel_y + 52, panel_w.saturating_sub(40), 40),
+            search: Rect::new(panel_x + 20, panel_y + 60, panel_w.saturating_sub(40), 40),
             tiles,
             apps,
             count,
@@ -2934,6 +3046,20 @@ fn control_rects(window: &Window) -> [Rect; 3] {
     let maximize = Rect::new(close.x - 46, window.y, 46, TITLEBAR_H);
     let minimize = Rect::new(maximize.x - 46, window.y, 46, TITLEBAR_H);
     [minimize, maximize, close]
+}
+
+fn wallpaper_button(window: &Window) -> Rect {
+    Rect::new(window.x+208,window.y+TITLEBAR_H as i32+110,90,22)
+}
+
+pub fn file_key(event: KeyEvent) -> bool {
+    let mut wm=WM.lock();
+    if !wm.top_visible().and_then(|i| wm.windows[i]).is_some_and(|w| w.kind==WindowKind::Files) {
+        return false;
+    }
+    wm.files.key(event.key);
+    invalidate();
+    true
 }
 
 fn settings_swatches(window: &Window) -> [Rect; 4] {
@@ -3113,7 +3239,7 @@ fn draw_button(
     );
 }
 
-fn fill_wallpaper(buffer: &mut [u32], width: usize, height: usize) {
+fn fill_wallpaper(buffer: &mut [u32], width: usize, height: usize, gradient: bool) {
     let pixels = width.saturating_mul(height);
     if width == 0 || height == 0 || buffer.len() < pixels {
         return;
@@ -3127,55 +3253,16 @@ fn fill_wallpaper(buffer: &mut [u32], width: usize, height: usize) {
         }
     }
 
-    // The terrain is baked into the existing wallpaper surface once per mode.
-    // Each ridge interpolates a handful of normalized elevation samples.
-    if !safe_mode() {
-        glow(
-            buffer,
-            width,
-            height,
-            (width as i64 * 32) / 100,
-            (height as i64 * 30) / 100,
-            (height as i64 * 55) / 100,
-            0x004D_678C,
-            34,
-        );
-        glow(
-            buffer,
-            width,
-            height,
-            (width as i64 * 76) / 100,
-            (height as i64 * 44) / 100,
-            (height as i64 * 65) / 100,
-            0x00A3_739B,
-            50,
-        );
-        // Backlit distant hills down to the dark foreground. Precompute a
-        // short vertical colour ramp per layer, not per pixel.
-        for (levels, rim, base) in [
-            ([65, 60, 66, 49, 39, 44], 0x008C_779F, 0x0046_4168),
-            ([55, 66, 74, 67, 52, 42], 0x0064_6A98, 0x0032_385A),
-            ([76, 69, 72, 82, 69, 58], 0x004B_5B82, 0x0024_304C),
-            ([84, 88, 84, 77, 80, 72], 0x0036_4660, 0x0018_243A),
-        ] {
-            let ramp: [u32; 64] = core::array::from_fn(|i| mix(rim, base, i, 63));
-            let fade = (height / 4).max(1);
-            for x in 0..width {
-                let phase = x * 5 * 256 / width;
-                let k = phase >> 8;
-                let t = phase & 255;
-                let eased = t*t*(768 - 2*t) >> 16;
-                let ridge = height * (levels[k]*(256-eased) + levels[k+1]*eased) / 25600;
-                for y in ridge..height {
-                    buffer[y*width+x] = ramp[((y-ridge)*63/fade).min(63)];
-                }
-            }
-        }
+    if !safe_mode() && !gradient {
+        nightfall::draw(buffer,width,height);
     }
 
     dither(buffer, width, height);
-    logo::draw(buffer, width, height, 22, 12, 32);
-    draw_text(buffer, width, height, 61, 18, width as i32, "Zenith  /  Workspace", FG);
+    let label = "Zenith   /   Nightfall";
+    let right = 61+ui_art::text_width(label);
+    rounded_rect(buffer,width,height,16,12,(right-16+14) as usize,36,17,0x182036);
+    logo::draw(buffer,width,height,23,14,31);
+    draw_text(buffer,width,height,61,20,right, label,FG);
 }
 
 /// Ordered 4x4 dithering: a ±1 LSB perturbation breaks up gradient banding

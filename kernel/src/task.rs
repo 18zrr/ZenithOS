@@ -208,7 +208,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
         }
         "browser" => crate::wm::open_browser(),
         "sysinfo" => {
-            diagnostics::println("Zenith OS v0.3.0 - system overview");
+            diagnostics::println(concat!("Zenith OS v", env!("CARGO_PKG_VERSION"), " - system overview"));
             diagnostics::puts("boot: ");
             diagnostics::println(if crate::limine::is_active() { "Limine native" } else { "PVH direct" });
             let (width, height) = crate::framebuffer::dimensions();
@@ -325,7 +325,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
                 }
             }
         }
-        "version" => diagnostics::println("Zenith OS v0.3.0 (x86_64, Limine)"),
+        "version" => diagnostics::println(concat!("Zenith OS v", env!("CARGO_PKG_VERSION"), " (x86_64, Limine)")),
         "about" => {
             diagnostics::println("Zenith OS - an independent x86_64 operating");
             diagnostics::println("system written in Rust and assembly.");
@@ -398,7 +398,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
 fn shell_task() {
     const CAPACITY: usize = 16;
 
-    diagnostics::println("Zenith OS v0.3.0 - interactive shell");
+    diagnostics::println(concat!("Zenith OS v", env!("CARGO_PKG_VERSION"), " - interactive shell"));
     diagnostics::println("Type 'help' for available commands.");
     diagnostics::puts("zenith> ");
 
@@ -413,22 +413,31 @@ fn shell_task() {
         crate::usb::poll();
 
         // Mouse events drive the window manager.
-        match crate::wm::pump() {
-            crate::wm::Action::Installer => {
-                run_installer();
-                continue;
-            }
-            crate::wm::Action::DisplayMode(width, height) => {
-                let _ = crate::wm::apply_display(width, height);
-                continue;
-            }
-            crate::wm::Action::None => {}
+        macro_rules! dispatch {
+            ($action:expr) => { match $action {
+                crate::wm::Action::Shutdown => crate::acpi::shutdown(),
+                crate::wm::Action::Restart => crate::acpi::restart(),
+                crate::wm::Action::Logout => {
+                    line.fill(0);
+                    length=0;
+                    history.fill([0;128]);
+                    history_len=0;
+                    history_index=0;
+                    crate::framebuffer::clear_screen();
+                    diagnostics::puts("zenith> ");
+                }
+                crate::wm::Action::Installer => run_installer(),
+                crate::wm::Action::DisplayMode(w,h) => { let _=crate::wm::apply_display(w,h); }
+                crate::wm::Action::None => {}
+            } };
         }
+        dispatch!(crate::wm::pump());
 
         while let Some(event) = keyboard::take_event() {
             if !event.pressed {
                 continue;
             }
+            if crate::wm::welcome_key(event) { continue; }
             match event.key {
                 keyboard::Key::F(1) => {
                     crate::wm::toggle_menu();
@@ -443,15 +452,14 @@ fn shell_task() {
 
             // While the Start menu is open it owns all keyboard input.
             if crate::start_menu::is_open() {
-                if crate::wm::menu_key(event) == crate::wm::Action::Installer {
-                    run_installer();
-                }
+                dispatch!(crate::wm::menu_key(event));
                 continue;
             }
 
             if crate::wm::browser_key(event) {
                 continue;
             }
+            if crate::wm::file_key(event) { continue; }
             if crate::wm::scroll_key(event.key) {
                 continue;
             }

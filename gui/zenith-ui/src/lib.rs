@@ -28,11 +28,11 @@ pub struct Theme {
 impl Theme {
     /// Afterglow: deep ink surfaces, cool moonlight text and a lilac accent.
     pub const DARK: Self = Self {
-        wallpaper_top: 0x00101930,
-        wallpaper_bottom: 0x0041395F,
-        window: 0x00121829,
-        title_bar: 0x00252D45,
-        taskbar: 0x00192033,
+        wallpaper_top: 0x000B152D,
+        wallpaper_bottom: 0x00AB829A,
+        window: 0x0012192A,
+        title_bar: 0x00252E48,
+        taskbar: 0x00192034,
         accent: 0x00BAAAFF,
         text: 0x00F2F4FF,
         muted: 0x00B3BED4,
