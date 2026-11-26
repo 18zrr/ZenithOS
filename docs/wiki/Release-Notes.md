@@ -1,4 +1,9 @@
-# Release Notes — Unreleased desktop update
+# ZenithOS v0.3.2 — Nightfall
+
+Current notes are maintained in [RELEASE_NOTES.md](../../RELEASE_NOTES.md).
+See [release identity](Release-Identity.md) for the permanent codename policy.
+
+# Historical notes — Unreleased desktop update
 
 **2026-11-18 · x86_64 · Limine bootloader**
 

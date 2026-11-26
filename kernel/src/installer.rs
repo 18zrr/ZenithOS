@@ -81,7 +81,7 @@ fn render(step: usize, selection: usize, progress: usize, result: Option<bool>) 
         0 => {
             fb::text(x, y, "Welcome to Zenith OS", FG);
             y += 40;
-            fb::text(x, y, concat!("This wizard will install Zenith OS v", env!("CARGO_PKG_VERSION")), MUTED);
+            fb::text(x, y, env!("ZENITH_RELEASE_ASCII"), MUTED);
             y += 24;
             fb::text(x, y, "on your computer.", MUTED);
             y += 56;

@@ -79,3 +79,26 @@
 3. Avoid implementing unapproved or unsupported features until ready
 
 These rules ensure consistent development practices while maintaining the quality and safety standards required for operating system development.
+
+## Permanent release identity requirements
+
+The complete official codename table and release checklist in `AGENTS.md`
+are mandatory for all future releases and supplement every rule above.
+Use `ZenithOS v<version> — <codename>` (currently
+**ZenithOS v0.3.2 — Nightfall**). All patches retain their major/minor series
+codename. Never substitute names for an assigned series; request approval
+before naming an unassigned series. Never change versions without an explicit
+request.
+
+Keep the OS version centralized in `Cargo.toml` (`workspace.package.version`)
+and codenames in `release-codenames.txt`. Runtime and build metadata must derive
+from these sources wherever feasible. Keep code, build configuration, kernel,
+Settings/About, terminal, boot screens, README, release notes, status, relevant
+wiki documentation, GitHub titles and artifact names synchronized.
+
+Use lowercase codenames in distribution filenames, for example
+`zenithos-v0.3.1-nightfall-x86_64.iso`, and semantic-version tags (`v0.3.1`).
+Release codenames are not desktop environment or theme names. ASCII-only
+screens may substitute a hyphen for the canonical title's em dash.
+Do not rename unrelated source files, modules, APIs or existing tags. Do not
+create a release, commit or push without explicit authorization.

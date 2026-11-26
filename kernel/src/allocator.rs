@@ -15,8 +15,12 @@ struct BumpAllocator;
 unsafe impl GlobalAlloc for BumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut current = OFFSET.load(Ordering::Relaxed);
+        let base = core::ptr::addr_of_mut!(HEAP) as *mut u8 as usize;
         loop {
-            let aligned = (current + layout.align() - 1) & !(layout.align() - 1);
+            // Align the address, not just the offset: HEAP has byte alignment.
+            let Some(address) = base.checked_add(current)
+                .and_then(|p| p.checked_add(layout.align()-1)) else { return core::ptr::null_mut(); };
+            let aligned = (address & !(layout.align()-1)) - base;
             let end = match aligned.checked_add(layout.size()) {
                 Some(end) => end,
                 None => return core::ptr::null_mut(),

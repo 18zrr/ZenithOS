@@ -1,5 +1,9 @@
 # Status
 
+Current release identity: **ZenithOS v0.3.2 — Nightfall**.
+See [release identity](Release-Identity.md) and the root `STATUS.md` for
+current metadata. Verification records below describe earlier development.
+
 This page reflects the verified state after the unreleased desktop update
 (compositing window manager and PS/2 + USB HID mouse input), on top of the
 v0.1.0 baseline. For the authoritative release summary, see

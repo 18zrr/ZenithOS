@@ -1,5 +1,11 @@
 # Zenith OS - Project Status
 
+Current release identity: **ZenithOS v0.3.2 — Nightfall**.
+Polish implementation and QEMU results are recorded in `RELEASE_NOTES.md`.
+The workspace manifest and `release-codenames.txt` are authoritative.
+Canonical artifacts use lowercase codenames; the short image names below
+remain compatibility paths. Older verification records below are historical.
+
 ## Verified working (this revision)
 
 - **Workspace**: `cargo build --workspace` is clean and

@@ -1,0 +1,16 @@
+0.1=Genesis
+0.2=Horizon
+0.3=Nightfall
+0.4=Aurora
+0.5=Nebula
+0.6=Eclipse
+0.7=Pulsar
+0.8=Equinox
+0.9=Solstice
+1.0=Ascension
+1.1=Polaris
+1.2=Vega
+1.3=Orion
+1.4=Andromeda
+1.5=Supernova
+2.0=Infinity

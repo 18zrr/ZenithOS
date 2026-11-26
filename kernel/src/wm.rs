@@ -12,6 +12,8 @@ use core::mem;
 mod files;
 mod prefs;
 mod nightfall;
+mod context;
+pub use context::key as context_key;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::vec;
@@ -84,6 +86,7 @@ static NEXT_FRAME: AtomicU64 = AtomicU64::new(0);
 static NEXT_BROWSER_CHECK: AtomicU64 = AtomicU64::new(0);
 static LAST_CARET: AtomicBool = AtomicBool::new(false);
 static LAST_MINUTE: AtomicU64 = AtomicU64::new(u64::MAX);
+static NEXT_CLOCK_CHECK: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WindowKind {
@@ -143,9 +146,9 @@ struct Window {
 impl Window {
     fn max_scroll(self) -> usize {
         let content: usize = match self.kind {
-            WindowKind::Settings => 14 + 152 + DISPLAY_CARD_H + 10 + 116 + 12,
+            WindowKind::Settings => 14 + 152 + DISPLAY_CARD_H + 10 + 116 + 12 + 82,
             WindowKind::Monitor => 14 + 126 + 146 + 116 + 12,
-            WindowKind::About => 12 + 78 + 82 + 3*24 + 20 + 12,
+            WindowKind::About => 12 + 78 + 82 + 7*24 + 20 + 12,
             _ => 0,
         };
         content.saturating_sub(self.h.saturating_sub(TITLEBAR_H + 2))
@@ -171,6 +174,8 @@ struct Resize {
 }
 
 struct Wm {
+    context: Option<(i32, i32, usize)>,
+    clock: Option<rtc::DateTime>,
     files: files::Files,
     prefs: prefs::Prefs,
     initialized: bool,
@@ -196,6 +201,8 @@ struct Wm {
 impl Wm {
     const fn new() -> Self {
         Wm {
+            context: None,
+            clock: None,
             files: files::Files::new(),
             prefs: prefs::Prefs::DEFAULT,
             initialized: false,
@@ -888,9 +895,13 @@ pub fn tick() {
     }
 
     // Repaint when the wall-clock minute changes, even with no input events.
-    if now % 50 == 0 {
-        let (hour, minute, _) = rtc::time();
-        let value = hour as u64 * 60 + minute as u64;
+    if now >= NEXT_CLOCK_CHECK.load(Ordering::Relaxed) {
+        NEXT_CLOCK_CHECK.store(now + 50, Ordering::Relaxed);
+        let clock = rtc::now();
+        let value = clock.map_or(u64::MAX - 1, |t|
+            ((((t.year as u64 * 13 + t.month as u64) * 32 + t.day as u64) * 24
+                + t.hour as u64) * 60) + t.minute as u64);
+        WM.lock().clock = clock;
         if value != LAST_MINUTE.load(Ordering::Relaxed) {
             LAST_MINUTE.store(value, Ordering::Relaxed);
             invalidate();
@@ -914,6 +925,7 @@ pub fn toggle_menu() {
         return;
     }
     start_menu::toggle();
+    WM.lock().context = None;
     invalidate();
 }
 
@@ -1018,7 +1030,8 @@ pub fn focus_terminal() -> bool {
         return false;
     }
     let Some(index) = wm.find(WindowKind::Terminal) else {
-        return false;
+        wm.open_window(WindowKind::Terminal);
+        return true;
     };
     if let Some(window) = wm.windows[index] {
         if window.minimized {
@@ -1103,7 +1116,20 @@ pub fn pump() -> Action {
             invalidate();
             continue;
         }
-        if wm.browser_pointer(event) { continue; }
+        if event.kind == mouse::EVENT_BUTTON_DOWN && event.button == mouse::BUTTON_RIGHT
+            && matches!(wm.hit_test(event.x, event.y), Hit::Desktop) {
+            start_menu::close();
+            wm.context = Some(((event.x).clamp(0, wm.width.saturating_sub(220) as i32),
+                event.y.clamp(0, wm.height.saturating_sub(TASKBAR_H + 166) as i32), 0));
+            invalidate();
+            continue;
+        }
+        if wm.context.is_some() {
+            if event.kind == mouse::EVENT_BUTTON_DOWN {
+                wm.context_click(event.x,event.y);
+                continue;
+            }
+        } else if wm.browser_pointer(event) { continue; }
         match event.kind {
             mouse::EVENT_MOVE => {
                 wm.handle_move(event.x, event.y);
@@ -1113,6 +1139,7 @@ pub fn pump() -> Action {
                 action = wm.handle_click(event.x, event.y);
             }
             mouse::EVENT_BUTTON_UP if event.button == mouse::BUTTON_LEFT => {
+                invalidate(); // release pressed-state feedback
                 if wm.dragging.is_some() || wm.resizing.is_some() {
                     wm.dragging = None;
                     wm.resizing = None;
@@ -1192,6 +1219,7 @@ fn render() {
     if start_menu::is_open() {
         wm.draw_start_menu(&mut frame, mouse_x, mouse_y);
     }
+    wm.draw_context(&mut frame, mouse_x, mouse_y);
     }
     draw_cursor(&mut frame, wm.width, wm.height, mouse_x, mouse_y);
 
@@ -1238,6 +1266,11 @@ impl Wm {
     fn session_action(&mut self, index: usize) -> Action {
         start_menu::close();
         invalidate();
+        if self.files.dirty() {
+            self.files.request_close(false);
+            self.open_window(WindowKind::Files);
+            return Action::None; // Finish the draft, then retry the session action.
+        }
         match index {
             0 => {
                 self.windows = [None; MAX_WINDOWS];
@@ -1322,6 +1355,12 @@ impl Wm {
     }
 
     fn close_window(&mut self, index: usize) {
+        if self.windows[index].is_some_and(|w| w.kind == WindowKind::Files)
+            && !self.files.request_close(true) {
+            self.focus_index(index);
+            invalidate();
+            return;
+        }
         self.windows[index] = None;
         if let Some(position) = self.order[..self.order_len]
             .iter()
@@ -1864,7 +1903,9 @@ impl Wm {
         for (control, glyph) in controls.iter().zip(["min", "max", "close"].iter()) {
             let hovered = control.contains(mouse_x, mouse_y);
             if hovered {
-                let background = if *glyph == "close" {
+                let background = if mouse::buttons() & mouse::BUTTON_LEFT != 0 {
+                    MENU_TILE_SELECTED
+                } else if *glyph == "close" {
                     CLOSE_HOVER
                 } else {
                     0x0032_3F50
@@ -2444,6 +2485,9 @@ impl Wm {
 
         // Input card.
         let input_y = display_y + DISPLAY_CARD_H as i32 + 10;
+        self.card(frame, x, input_y + 126, card_w, 72, "System");
+        draw_text(frame, stride, height, label_x, input_y + 166, max_x,
+            env!("ZENITH_RELEASE_ASCII"), FG);
         self.card(frame, x, input_y, card_w, 116, "Input");
         self.monitor_row(
             frame,
@@ -2495,8 +2539,8 @@ impl Wm {
         rounded_rect(frame,stride,height,x,top,window.w-48,124,14,TITLE_ACTIVE);
         logo::draw(frame,stride,height,center-29,top+2,58);
         let y = top + 78;
-        draw_text_centered(frame,stride,height,center,y-19,"Zenith OS   /   Nightfall",FG);
-        draw_text_centered(frame,stride,height,center,y+10,concat!("Version ", env!("CARGO_PKG_VERSION")),self.accent);
+        draw_text_centered(frame,stride,height,center,y-19,"ZenithOS",FG);
+        draw_text_centered(frame,stride,height,center,y+10,concat!("v", env!("CARGO_PKG_VERSION"), " - ", env!("ZENITH_CODENAME")),self.accent);
         draw_text_centered(
             frame,
             stride,
@@ -2522,9 +2566,13 @@ impl Wm {
         memory.push_str(" MiB usable");
 
         let rows = [
+            ("Kernel", env!("CARGO_PKG_VERSION")),
+            ("Codename", env!("ZENITH_CODENAME")),
             ("Boot", boot.as_str()),
             ("Display", ""),
             ("Memory", memory.as_str()),
+            ("Display driver", display::backend_name()),
+            ("Pointer", mouse::source()),
             ("License", "MIT"),
         ];
         for (index, (label, value)) in rows.iter().enumerate() {
@@ -2598,7 +2646,7 @@ impl Wm {
                 48,
                 48,
                 12,
-                TASKBAR_HOVER,
+                     if mouse::buttons() & mouse::BUTTON_LEFT != 0 { MENU_TILE_SELECTED } else { TASKBAR_HOVER },
             );
         }
         logo::draw(
@@ -2609,6 +2657,10 @@ impl Wm {
             layout.start.y + 7,
             38,
         );
+        if layout.start.contains(mouse_x,mouse_y) && !start_menu::is_open() {
+            rounded_rect(frame,stride,height,layout.start.x,panel.y-32,86,26,8,TASKBAR_BG);
+            draw_text(frame,stride,height,layout.start.x+8,panel.y-29,layout.start.x+80,"Start (F1)",FG);
+        }
 
         // Pinned applications.
         for (index, kind) in TASKBAR_KINDS.iter().enumerate() {
@@ -2685,19 +2737,30 @@ impl Wm {
             );
         }
 
-        let (hour, minute, _) = rtc::time();
         let mut clock = TextBuffer::new();
-        clock.push_time(hour, minute);
+        if let Some(t) = self.clock { clock.push_time(t.hour, t.minute); }
+        else { clock.push_str("--:--"); }
         draw_text(
             frame,
             stride,
             height,
             panel.right() - 16 - 5 * COL_PITCH as i32,
-            panel.y + 22,
+            panel.y + 12,
             panel.right() - 16,
             clock.as_str(),
             FG,
         );
+        let mut date = TextBuffer::new();
+        if let Some(t) = self.clock {
+            date.push_dec(t.year as u64);
+            date.push(b'-');
+            if t.month < 10 { date.push(b'0'); }
+            date.push_dec(t.month as u64);
+            date.push(b'-');
+            if t.day < 10 { date.push(b'0'); }
+            date.push_dec(t.day as u64);
+        } else { date.push_str("RTC unavailable"); }
+        draw_text(frame, stride, height, panel.right()-110, panel.y+35, panel.right()-8, date.as_str(), MUTED);
     }
 
     fn draw_start_menu(&self, frame: &mut [u32], mouse_x: i32, mouse_y: i32) {
@@ -2739,7 +2802,7 @@ impl Wm {
             panel.x + 56,
             panel.y + 18,
             panel.right(),
-            "Nightfall   /   Launchpad",
+            concat!(env!("ZENITH_CODENAME"), "   /   Launchpad"),
             FG,
         );
         draw_text(
@@ -2749,7 +2812,7 @@ impl Wm {
             panel.right() - 24 - 10 * COL_PITCH as i32,
             panel.y + 20,
             panel.right() - 16,
-            concat!("Zenith ", env!("CARGO_PKG_VERSION")),
+            env!("ZENITH_RELEASE_ASCII"),
             DIM,
         );
 
@@ -3077,6 +3140,9 @@ pub fn file_key(event: KeyEvent) -> bool {
     let Some(window) = wm.top_visible().and_then(|i| wm.windows[i]) else { return false; };
     if window.kind != WindowKind::Files { return false; }
     wm.files.key(event, &window);
+    if wm.files.take_closed() {
+        if let Some(i) = wm.find(WindowKind::Files) { wm.close_window(i); }
+    }
     invalidate();
     true
 }

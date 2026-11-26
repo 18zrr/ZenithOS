@@ -1,4 +1,46 @@
-# Zenith OS v0.3.1 — Nightfall
+# ZenithOS v0.3.2 — Nightfall
+
+Release identity is now centralized in the workspace version and codename
+registry. Kernel labels and distribution filenames derive from that metadata.
+
+## Polish and reliability
+
+- Desktop right-click menu with keyboard navigation, cached firmware clock
+  and date, Start tooltip, pressed feedback, and expanded About details.
+- File properties, retained selection on refresh/up, and retryable rename errors.
+- Editor dirty marker, close confirmation, Shift+arrow selection, Ctrl+A,
+  Save As, and save errors that retain the draft.
+- Save As and Copy create the directory entry and contents transactionally;
+  collisions never overwrite the destination. Zenith FS v5 remains compatible.
+- Real `date`, `meminfo`, `pwd`, `ls`, `mkdir`, `touch`, and `cat` commands.
+- Correct heap address alignment, halt the idle task until an interrupt,
+  and limit RTC sampling rather than reading repeatedly within one tick.
+- BIOS/UEFI image boot partitions no longer overlap fixed-offset filesystem
+  fixtures. Image builders accept a `LIMINE_DIR` override.
+
+## Verification
+
+- Locked workspace tests: **41 passed**, including interrupted Save As.
+- ISO and UEFI image generation succeeded.
+- QEMU BIOS ISO desktop/storage regression passed: edit/save, window switching,
+  reboot/copy, and unknown-disk preservation.
+- QEMU polish regression passed: shell create/read, selection, Save As,
+  rename, properties navigation, delete confirmation, unsaved cancel/discard,
+  persistence across reboot, date and version.
+- OVMF UEFI image boot reached the compositor and interactive shell.
+- QEMU pointer/keyboard and screenshot checks verified maximize/restore,
+  minimize/focus/close, desktop context menu, clock/date and About rendering.
+
+## Known limitations
+
+The editor supports ASCII with LF newlines, up to 4 KiB; Copy is limited to
+256 KiB. Save As requires a new filename in the current folder. Confirmation
+dialogs use keyboard actions. Time follows firmware, without timezone or NTP.
+Shell paths start at `/`; there is no `cd` or shell quoting.
+The existing bump allocator still does not reclaim memory. No physical
+hardware compatibility or exhaustive regression coverage is claimed.
+
+# ZenithOS v0.3.1 — Nightfall
 
 ## Fixed
 
@@ -46,7 +88,9 @@ new corruption; they do not repair files damaged by previous builds.
 
 [Desktop preview](docs/nightfall-desktop.png)
 
-# Zenith OS v0.2.0 — Browser companion and desktop fixes
+# ZenithOS v0.2.0 — Horizon
+
+Browser companion and desktop fixes.
 
 ## Update notes — 2026-11-19
 
@@ -187,7 +231,7 @@ notes remain below.
 - The `zenith-ui` crate remains a host-side software model; the live desktop is
   `kernel/src/wm.rs`.
 
-# Zenith OS v0.1.0
+# ZenithOS v0.1.0 — Genesis
 
 **2026-11-16 · x86_64 · Limine bootloader**
 

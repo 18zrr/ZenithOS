@@ -204,11 +204,17 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
             diagnostics::println("  display   show or set WIDTHxHEIGHT");
             diagnostics::println("  pointer   mouse cursor position");
             diagnostics::println("  install   graphical installation wizard");
+            diagnostics::println("  date      firmware wall-clock date and time");
+            diagnostics::println("  meminfo   memory summary (alias of mem)");
+            diagnostics::println("  pwd       current directory (/)");
+            diagnostics::println("  ls [path] list a Zenith FS directory");
+            diagnostics::println("  mkdir path / touch path   create folder / file");
+            diagnostics::println("  cat path  print a file (up to 64 KiB)");
             diagnostics::println("F1 opens the Start menu; F12 changes display orientation.");
         }
         "browser" => crate::wm::open_browser(),
         "sysinfo" => {
-            diagnostics::println(concat!("Zenith OS v", env!("CARGO_PKG_VERSION"), " - system overview"));
+            diagnostics::println(env!("ZENITH_RELEASE_ASCII"));
             diagnostics::puts("boot: ");
             diagnostics::println(if crate::limine::is_active() { "Limine native" } else { "PVH direct" });
             let (width, height) = crate::framebuffer::dimensions();
@@ -263,7 +269,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
             diagnostics::put_dec(count);
             diagnostics::puts("\n");
         }
-        "mem" => {
+        "mem" | "meminfo" => {
             let (regions, usable) = crate::limine::memory_summary();
             diagnostics::puts("usable memory: ");
             diagnostics::put_dec(usable / (1024 * 1024));
@@ -325,7 +331,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
                 }
             }
         }
-        "version" => diagnostics::println(concat!("Zenith OS v", env!("CARGO_PKG_VERSION"), " (x86_64, Limine)")),
+        "version" => diagnostics::println(concat!(env!("ZENITH_RELEASE_ASCII"), " (x86_64, Limine)")),
         "about" => {
             diagnostics::println("Zenith OS - an independent x86_64 operating");
             diagnostics::println("system written in Rust and assembly.");
@@ -341,6 +347,51 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
             diagnostics::println(" s");
         }
         "clear" => diagnostics::clear_screen(),
+        "date" => {
+            if let Some(t) = crate::rtc::now() {
+                diagnostics::println(&alloc::format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} (firmware clock)",
+                    t.year,t.month,t.day,t.hour,t.minute,t.second));
+            } else { diagnostics::println("date: RTC unavailable"); }
+        }
+        "pwd" => diagnostics::println("/"),
+        "ls" | "mkdir" | "touch" | "cat" => {
+            let path = args.unwrap_or("").trim();
+            let result = crate::fs::volume(|fs| {
+                match command {
+                    "ls" => {
+                        for (name, directory) in fs.list(if path.is_empty() { "/" } else { path })? {
+                            diagnostics::puts(&name);
+                            diagnostics::println(if directory { "/" } else { "" });
+                        }
+                    }
+                    "mkdir" | "touch" => {
+                        if path.is_empty() { return Err(zenith_fs::FsError::InvalidPath); }
+                        if command == "touch" {
+                            match fs.resolve(path) {
+                                Ok(id) if !fs.stat(id)?.1 => return Ok(()),
+                                Ok(_) => return Err(zenith_fs::FsError::InvalidPath),
+                                Err(zenith_fs::FsError::FileNotFound) => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        fs.create_path(path, command == "mkdir")?;
+                    }
+                    _ => {
+                        let id = fs.resolve(path)?;
+                        let (size, directory) = fs.stat(id)?;
+                        if directory { return Err(zenith_fs::FsError::InvalidPath); }
+                        let data = fs.read_range(id, 0, 65536)?;
+                        for b in data {
+                            diagnostics::putc(if b == b'\n' || b == b'\t' || (32..=126).contains(&b) { b } else { b'.' });
+                        }
+                        diagnostics::println("");
+                        if size > 65536 { diagnostics::println("[cat: output limited to 64 KiB]"); }
+                    }
+                }
+                Ok(())
+            });
+            if let Err(e) = result { diagnostics::println(&alloc::format!("{command}: {e}")); }
+        }
         "flip" => crate::framebuffer::cycle_orientation(),
         "display" => match args {
             Some(text) => match crate::display::parse(text) {
@@ -398,7 +449,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
 fn shell_task() {
     const CAPACITY: usize = 16;
 
-    diagnostics::println(concat!("Zenith OS v", env!("CARGO_PKG_VERSION"), " - interactive shell"));
+    diagnostics::println(concat!(env!("ZENITH_RELEASE_ASCII"), " - interactive shell"));
     diagnostics::println("Type 'help' for available commands.");
     diagnostics::puts("zenith> ");
 
@@ -438,6 +489,7 @@ fn shell_task() {
                 continue;
             }
             if crate::wm::welcome_key(event) { continue; }
+            if crate::wm::context_key(event) { continue; }
             match event.key {
                 keyboard::Key::F(1) => {
                     crate::wm::toggle_menu();
@@ -606,6 +658,8 @@ fn heartbeat_task() {
 
 fn idle_task() {
     loop {
+        // IRQs remain enabled; the PIT wakes us within 10 ms for USB polling.
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
         yield_now();
     }
 }

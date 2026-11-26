@@ -585,6 +585,7 @@ impl<B: BlockDevice> ZenithFs<B> {
             || name == "." || name == ".." { return Err(FsError::InvalidPath); }
         let (dir, old) = path.rsplit_once('/').unwrap_or(("", path));
         let parent = self.resolve(dir)?;
+        if old == name { self.resolve(path)?; return Ok(()); }
         let inode = self.inodes[parent as usize];
         if !self.may(&inode, Access::Write) || !self.may(&inode, Access::Execute) {
             return Err(FsError::PermissionDenied);
@@ -607,6 +608,23 @@ impl<B: BlockDevice> ZenithFs<B> {
 
     /// Write data to a file inode, replacing its contents.
     pub fn write(&mut self, inode_number: u32, data: &[u8]) -> Result<(), FsError> {
+        self.transaction(|fs| fs.write_contents(inode_number, data))
+    }
+
+    /// Create a new file and its contents in one transaction. Never overwrite
+    /// a colliding destination (used by desktop Save As and Copy).
+    pub fn create_with_data(&mut self, path: &str, data: &[u8]) -> Result<u32, FsError> {
+        let path = path.trim_matches('/');
+        let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let parent = self.resolve(dir)?;
+        self.transaction(|fs| {
+            let id = fs.create_entry(parent, name, false)?;
+            fs.write_contents(id, data)?;
+            Ok(id)
+        })
+    }
+
+    fn write_contents(&mut self, inode_number: u32, data: &[u8]) -> Result<(), FsError> {
         let index = inode_number as usize;
         if index == 0 || index >= INODE_COUNT || self.inodes[index].links == 0 {
             return Err(FsError::FileNotFound);
@@ -616,7 +634,7 @@ impl<B: BlockDevice> ZenithFs<B> {
         }
         let old_inode = self.inodes[index];
         if old_inode.file_type != 0 { return Err(FsError::InvalidPath); }
-        self.transaction(|fs| {
+        let fs = self;
             let mut runs = Vec::new();
             for (logical, chunk) in data.chunks(BLOCK_SIZE).enumerate() {
                 let block = fs.allocate_block()?;
@@ -628,7 +646,6 @@ impl<B: BlockDevice> ZenithFs<B> {
             fs.inodes[index].extent_root = fs.build_tree(&runs)?;
             fs.inodes[index].size = data.len() as u64;
             fs.free_extents(&old_inode)
-        })
     }
 
     /// Read a range of a file.
@@ -751,6 +768,13 @@ impl<B: BlockDevice> ZenithFs<B> {
         let inode = self.inodes.get(inode_number as usize).ok_or(FsError::FileNotFound)?;
         if inode.links == 0 { return Err(FsError::FileNotFound); }
         Ok((inode.size, inode.file_type == 1))
+    }
+
+    /// Stored mode, owner and group, without changing the on-disk format.
+    pub fn permissions(&self, inode_number: u32) -> Result<(u16, u16, u16), FsError> {
+        self.stat(inode_number)?;
+        let inode = self.inodes[inode_number as usize];
+        Ok((inode.permissions, inode.owner, inode.group))
     }
 
     pub fn superblock(&self) -> &SuperBlock { &self.superblock }
@@ -958,6 +982,30 @@ mod tests {
         assert_eq!(fs.superblock().free_blocks, free);
         let mut fs = ZenithFs::mount(fs.device).unwrap();
         assert_eq!(fs.read(id).unwrap(), b"original");
+    }
+
+    #[test]
+    fn save_as_is_atomic_and_never_overwrites_a_collision() {
+        let mut dev = memory(128);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fs = ZenithFs::mount(dev).unwrap();
+        let source = fs.create_with_data("source", b"keep me").unwrap();
+        assert_eq!(fs.create_with_data("source",b"overwrite"),Err(FsError::InvalidPath));
+        assert_eq!(fs.read(source).unwrap(),b"keep me");
+        let payload = [29; 900];
+        for budget in 0..100 {
+            let mut attempt = ZenithFs::mount(fs.device.clone()).unwrap();
+            attempt.device.writes_left = Some(budget);
+            let result = attempt.create_with_data("copy",&payload);
+            attempt.device.writes_left = None;
+            let mut recovered = ZenithFs::mount(attempt.device).unwrap();
+            assert_eq!(recovered.read(source).unwrap(),b"keep me");
+            if let Some(id) = recovered.find("copy") {
+                assert_eq!(recovered.read(id).unwrap(),payload);
+            } else { assert!(result.is_err()); }
+            if result.is_ok() { return; }
+        }
+        panic!("Save As never committed");
     }
 
     #[test]

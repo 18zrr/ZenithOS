@@ -1,10 +1,30 @@
-# Zenith OS 0.3.1 — Nightfall
+# ZenithOS v0.3.2 — Nightfall
 
 Zenith OS is an independent x86_64 operating system written in Rust, with
 assembly for the boot entry points. It uses a custom monolithic kernel, a
 custom filesystem (Zenith FS), and a custom graphical environment (Zenith UI).
 
-### New in v0.3.1
+Release identity comes from `workspace.package.version` in `Cargo.toml` and
+`release-codenames.txt`. Patch releases retain their series codename.
+Nightfall is the 0.3.x release codename; Zenith UI is the desktop environment
+and Afterglow is its theme. See [release policy](AGENTS.md).
+
+Image builders produce `zenithos-v0.3.2-nightfall-x86_64.iso`,
+`zenithos-v0.3.2-nightfall-x86_64-bios.img`, and
+`zenithos-v0.3.2-nightfall-x86_64-uefi.img`. They also copy to the existing
+`zenith.iso`, `zenith.img`, and `zenith-uefi.img` compatibility paths.
+Build metadata tools require Python 3.11 or newer.
+
+### New in v0.3.2
+
+Desktop context actions, firmware clock/date, expanded About information,
+file properties, unsaved-document protection, selection and atomic Save As.
+The shell now supports real Zenith FS operations and `date` / `meminfo`.
+Boot disk builders separate the boot partition from filesystem fixtures.
+See the [desktop guide](docs/desktop_manual.md),
+[terminal manual](docs/terminal_manual.md), and [release notes](RELEASE_NOTES.md).
+
+### Filesystem foundation from v0.3.1
 
 Zenith FS now preserves the previous file if a replacement runs out of space,
 and reads correctly across fragmented and unaligned block boundaries. Saves

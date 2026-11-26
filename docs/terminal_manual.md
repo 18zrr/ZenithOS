@@ -1,116 +1,46 @@
-# Zenith OS Terminal Manual
+# ZenithOS v0.3.2 — Nightfall terminal manual
 
-## Overview
-The Zenith OS terminal is a custom command-line interface designed for the Zenith operating system. It provides users with direct access to system commands, file operations, and basic utilities.
+Open Terminal from Start, the dock or the desktop context menu. Commands run
+at `zenith>`. Up/Down recalls history; normal line editing is supported.
 
-## Getting Started
-Upon booting Zenith OS, you'll be presented with a prompt:
-```
-zenith>
-```
+| Command | Operation |
+|---|---|
+| `help` | List implemented commands |
+| `clear` | Clear the terminal |
+| `version` | OS version, codename and boot architecture |
+| `uptime` | Time since boot |
+| `date` | Firmware date/time, or RTC unavailable |
+| `mem`, `meminfo` | Available kernel memory information |
+| `sysinfo` | System overview |
+| `pwd` | Print `/` (the shell has no change-directory command) |
+| `ls [path]` | List a Zenith FS directory, default `/` |
+| `mkdir path` | Create a directory; its parent must exist |
+| `touch path` | Create an empty file; existing files retain their data |
+| `cat path` | Print up to 64 KiB, replacing unsupported bytes with `.` |
+| `history` | Recent commands |
+| `pci`, `gpu`, `acpi` | Hardware diagnostics |
+| `net` | Network status |
+| `browser` | Open the Chromium companion |
+| `install` | Open the installation wizard |
+| `about` | Print OS information |
+| `echo text` | Print text |
+| `display` | Show display information; accepts a supported WIDTHxHEIGHT |
+| `flip` | Change display orientation |
+| `pointer` | Report mouse position |
 
-To exit the terminal, use the `exit` command (not implemented yet).
+Paths are relative to `/` unless prefixed with `/`. The entire remainder of
+the command is the path; no shell quoting, pipelines or expansion is provided.
+Filesystem errors are printed rather than simulated. Commands require a
+mounted Zenith FS volume. Time is firmware time without timezone conversion.
 
-## Basic Commands
+Example:
 
-### help
-**Usage:** `help [command]`
-**Description:** Shows available commands or detailed information about a specific command.
-**Example:**
-```bash
-zenith> help ls
-ls: List directory contents
-```
-
-### hello
-**Usage:** `hello`
-**Description:** Prints a greeting message from Zenith OS.
-**Example:**
-```bash
-zenith> hello
-Hello from Zenith OS!
-```
-
-### cls
-**Usage:** `cls`
-**Description:** Clears the terminal screen.
-**Example:**
-```bash
-zenith> cls
-```
-
-### ls
-**Usage:** `ls [directory]`
-**Description:** Lists directory contents. Shows files and subdirectories in the current location.
-**Example:**
-```bash
-zenith> ls
-Directory listing (simulated):
-  file1.txt
-  file2.txt
-  dir1/
+```text
+mkdir documents
+touch documents/notes
+ls documents
+cat documents/notes
 ```
 
-### pwd
-**Usage:** `pwd`
-**Description:** Prints the current working directory path.
-**Example:**
-```bash
-zenith> pwd
-/home/user
-```
-
-## Command Syntax
-
-All commands follow a simple syntax:
-```
-command [arguments]
-```
-
-Arguments are separated by spaces. For example, to list files in a specific directory:
-```bash
-ls /home/user/documents/
-```
-
-## File Operations
-
-The terminal provides basic file system operations through Zenith FS:
-
-### Creating Files
-Use the `touch` command (not yet implemented) to create new empty files.
-
-### Reading Files
-Use the `cat` command (not yet implemented) to display file contents.
-
-### Deleting Files
-Use the `rm` command (not yet implemented) to delete files.
-
-## System Information
-
-The terminal can provide system information using commands like:
-- `uname`: Shows operating system information
-- `df`: Displays disk space usage
-- `free`: Shows memory usage
-
-## Customization
-
-The terminal supports customization through environment variables. For example, you can set the prompt format using:
-```bash
-export PS1="zenith> "
-```
-
-## Troubleshooting
-
-### Command Not Found
-If a command is not recognized, it will return an error message indicating that the command was not found.
-
-### Permission Denied
-Some commands may require elevated privileges. If you encounter permission issues, check your user permissions or contact system administrators.
-
-## Future Features
-
-Upcoming enhancements include:
-- Tab completion for commands and file paths
-- History of executed commands
-- More advanced text editing capabilities
-- File transfer operations using Zenith FS
+Use File Manager's editor to write the file. See the
+[desktop guide](desktop_manual.md) for Save As and close confirmation.

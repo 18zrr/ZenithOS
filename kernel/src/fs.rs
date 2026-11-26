@@ -209,7 +209,7 @@ pub fn installer_write() -> Result<(), &'static str> {
     let inode = fs
         .create_path("/boot/ZENITH.CONF", false)
         .map_err(map_error)?;
-    let manifest = concat!("Zenith OS v", env!("CARGO_PKG_VERSION"), "\ninstalled-by=setup\nroot=zenith-fs\n").as_bytes();
+    let manifest = concat!(env!("ZENITH_RELEASE"), "\ninstalled-by=setup\nroot=zenith-fs\n").as_bytes();
     fs.write(inode, manifest).map_err(map_error)?;
     fs.flush().map_err(map_error)?;
     Ok(())
