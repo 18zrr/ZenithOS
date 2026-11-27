@@ -66,7 +66,7 @@ def worker(exe, url):
         elif 2 <= kind <= 5:
             x, y, btn = ev & 1023, (ev >> 10) & 1023, (ev >> 20) & 15
             xtest.fake_input(d, X.MotionNotify, root=root, x=min(x, WIDTH-1), y=min(y, HEIGHT-1))
-            if btn in (1, 2, 3, 4, 5, 8, 9):
+            if btn in (1, 2, 3, 4, 5, 6, 7, 8, 9):
                 if kind in (3, 5):
                     xtest.fake_input(d, X.ButtonPress, btn)
                 if kind in (4, 5):

@@ -564,7 +564,7 @@ unsafe fn control_transfer(
         }
         if td_index > setup_index && td_index < status_index && data_in {
             // UHCI stores (actual length - 1) in the status field.
-            actual += (status & TD_ACTUAL_LEN) as usize + 1;
+            actual += ((status + 1) & TD_ACTUAL_LEN) as usize;
         }
     }
 
@@ -686,6 +686,8 @@ unsafe fn set_keyboard_leds(
 struct InterfaceInfo {
     number: u8,
     protocol: u8,
+    boot: bool,
+    report_len: usize,
     endpoint: u8,
     max_packet: usize,
     interval: u8,
@@ -697,6 +699,8 @@ impl InterfaceInfo {
         InterfaceInfo {
             number: 0,
             protocol: 0,
+            boot: false,
+            report_len: 0,
             endpoint: 0,
             max_packet: 0,
             interval: 0,
@@ -789,7 +793,11 @@ unsafe fn rebuild_interrupt_chain(base: u16) {
 
     let data = controller();
     for index in 0..MAX_DEVICES {
-        (*data).interrupt_qh[index].element = TD_TERMINATE;
+        // Preserve the active TD of every attached endpoint when relinking
+        // queue heads (including the descriptor just armed by enqueue_device).
+        if !(*device(index)).used {
+            (*data).interrupt_qh[index].element = TD_TERMINATE;
+        }
         (*data).interrupt_qh[index].horizontal = TD_TERMINATE;
     }
 
@@ -1004,7 +1012,15 @@ unsafe fn enumerate_device(base: u16, port: usize, address: u8, low_speed: bool)
                 let protocol = CONTROLLER.data[offset + 7];
                 current.number = CONTROLLER.data[offset + 2];
                 current.protocol = protocol;
+                current.boot = CONTROLLER.data[offset + 6] == 1;
                 current.hid = class == 0x03;
+            }
+            0x21 if current.hid && length >= 9 => {
+                for descriptor in CONTROLLER.data[offset + 6..offset + length].chunks_exact(3) {
+                    if descriptor[0] == 0x22 {
+                        current.report_len = u16::from_le_bytes([descriptor[1], descriptor[2]]) as usize;
+                    }
+                }
             }
             0x05 if length >= 7 && current.hid => {
                 let address = CONTROLLER.data[offset + 2];
@@ -1031,6 +1047,10 @@ unsafe fn enumerate_device(base: u16, port: usize, address: u8, low_speed: bool)
         return false;
     }
 
+    if !set_configuration(base, address, low_speed, config_value, ep0_max) {
+        diagnostics::println("[usb] SET_CONFIGURATION failed");
+        return false;
+    }
     let mut chosen: Option<(InterfaceInfo, DeviceKind, bool, zenith_hid::MouseLayout)> = None;
     for candidate in interfaces.iter().take(interface_count) {
         if !candidate.valid() {
@@ -1041,12 +1061,12 @@ unsafe fn enumerate_device(base: u16, port: usize, address: u8, low_speed: bool)
             2 => Some(DeviceKind::Mouse),
             _ => None,
         };
-        let mut report_protocol = candidate.protocol == 2;
+        let mut report_protocol = false;
         let mut layout = UsbDevice::new().layout;
 
-        if kind.is_none() || kind == Some(DeviceKind::Mouse) {
+        if (kind.is_none() || kind == Some(DeviceKind::Mouse)) && (1..=MAX_DATA).contains(&candidate.report_len) {
             if let Some(length) =
-                get_report_descriptor(base, address, low_speed, candidate.number, 256, ep0_max)
+                get_report_descriptor(base, address, low_speed, candidate.number, candidate.report_len, ep0_max)
             {
                 let descriptor = &CONTROLLER.data[..length.min(MAX_DATA)];
                 if let Some(parsed) = zenith_hid::parse_mouse(descriptor) {
@@ -1080,19 +1100,11 @@ unsafe fn enumerate_device(base: u16, port: usize, address: u8, low_speed: bool)
         return false;
     };
 
-    if !set_configuration(base, address, low_speed, config_value, ep0_max) {
-        diagnostics::println("[usb] SET_CONFIGURATION failed");
-        return false;
-    }
-
     let _ = hid_request(base, address, low_speed, candidate.number, 0x0A, 0, ep0_max); // SET_IDLE(0)
-    let protocol = if kind == DeviceKind::Mouse && report_protocol {
-        0
-    } else {
-        1
-    };
-    if !hid_request(base, address, low_speed, candidate.number, 0x0B, protocol, ep0_max) {
+    let protocol = u16::from(report_protocol);
+    if candidate.boot && !hid_request(base, address, low_speed, candidate.number, 0x0B, protocol, ep0_max) {
         diagnostics::println("[usb] SET_PROTOCOL failed");
+        return false;
     }
 
     enqueue_device(
@@ -1198,7 +1210,7 @@ fn poll_device(index: usize) {
         }
 
         device.pending_error = false;
-        let length = (status & TD_ACTUAL_LEN) as usize + 1;
+        let length = ((status + 1) & TD_ACTUAL_LEN) as usize;
         let report_len = length.min(device.max_packet).min(16);
         if report_len > 0 {
             let report = &*core::ptr::addr_of!(CONTROLLER.reports[index].0);
@@ -1207,12 +1219,13 @@ fn poll_device(index: usize) {
                     crate::keyboard::usb_report(report, report_len);
                 }
                 DeviceKind::Mouse if device.report_protocol => {
-                    if let Some(decoded) = zenith_hid::decode_mouse(&device.layout, report) {
+                    if let Some(decoded) = zenith_hid::decode_mouse(&device.layout, &report[..report_len]) {
                         crate::mouse::usb_input(
                             decoded.buttons,
                             decoded.dx,
                             decoded.dy,
                             decoded.wheel,
+                            decoded.pan,
                         );
                     }
                 }

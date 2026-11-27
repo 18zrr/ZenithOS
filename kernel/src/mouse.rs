@@ -28,12 +28,13 @@ const CMD_WRITE_AUX: u8 = 0xD4;
 const MOUSE_SET_DEFAULTS: u8 = 0xF6;
 const MOUSE_ENABLE_REPORTING: u8 = 0xF4;
 const MOUSE_SET_SAMPLE: u8 = 0xF3;
-const MOUSE_GET_ID: u8 = 0xF1;
+const MOUSE_GET_ID: u8 = 0xF2;
 
 pub const EVENT_MOVE: u8 = 0;
 pub const EVENT_BUTTON_DOWN: u8 = 1;
 pub const EVENT_BUTTON_UP: u8 = 2;
 pub const EVENT_WHEEL: u8 = 3;
+pub const EVENT_PAN: u8 = 4;
 
 pub const BUTTON_LEFT: u8 = 1;
 pub const BUTTON_RIGHT: u8 = 2;
@@ -159,12 +160,12 @@ impl Mouse {
 
         let dx = self.packet[1] as i32 - if flags & 0x10 != 0 { 256 } else { 0 };
         let dy = self.packet[2] as i32 - if flags & 0x20 != 0 { 256 } else { 0 };
-        let mut buttons = self.button_mask(flags);
+        let mut buttons = self.button_mask(flags & 7);
         let mut scroll = 0i32;
         if self.wheel {
             let extra = self.packet[3];
             if self.explorer {
-                buttons |= self.button_mask((extra >> 1) & 0x18);
+                buttons |= (extra >> 1) & 0x18;
                 let nibble = extra & 0x0F;
                 scroll = if nibble & 0x08 != 0 {
                     (nibble as i32) - 16
@@ -176,14 +177,14 @@ impl Mouse {
             }
         }
         // PS/2 reports positive Y upwards; the screen grows downwards.
-        self.apply(buttons, dx, -dy, scroll);
+        self.apply(buttons, dx, -dy, -scroll, 0);
     }
 
     /// Apply a decoded report. USB HID and PS/2 share the button-bit layout,
     /// but USB reports positive Y downwards.
-    fn apply(&mut self, buttons: u8, dx: i32, dy: i32, wheel: i32) {
-        self.x += dx;
-        self.y += dy;
+    fn apply(&mut self, buttons: u8, dx: i32, dy: i32, wheel: i32, pan: i32) {
+        self.x = self.x.saturating_add(dx);
+        self.y = self.y.saturating_add(dy);
         self.clamp();
 
         let pressed = buttons & !self.buttons;
@@ -208,8 +209,9 @@ impl Mouse {
             }
         }
         if wheel != 0 {
-            self.push(EVENT_WHEEL, 0, wheel);
+            self.push(EVENT_WHEEL, 0, wheel.clamp(-127, 127));
         }
+        if pan != 0 { self.push(EVENT_PAN, 0, pan.clamp(-127, 127)); }
     }
 }
 
@@ -291,7 +293,7 @@ fn io_delay() {
 fn detect_extensions() -> (bool, bool) {
     // Magic sample-rate sequence selects the IntelliMouse protocol family.
     for rate in [200u8, 100, 80] {
-        if !(write_aux(MOUSE_SET_SAMPLE) && write_data(rate) && read_ack()) {
+        if !(write_aux(MOUSE_SET_SAMPLE) && read_ack() && write_aux(rate) && read_ack()) {
             return (false, false);
         }
     }
@@ -308,7 +310,7 @@ fn detect_extensions() -> (bool, bool) {
         4 => (true, true),
         _ => {
             // Put the device back into a clean three-byte stream.
-            let _ = write_aux(MOUSE_SET_SAMPLE) && write_data(100) && read_ack();
+            let _ = write_aux(MOUSE_SET_SAMPLE) && read_ack() && write_aux(100) && read_ack();
             (false, false)
         }
     }
@@ -360,6 +362,9 @@ pub fn init() -> bool {
     mouse.explorer = explorer;
     mouse.packet_index = 0;
     mouse.buttons = 0;
+    crate::diagnostics::serial_puts("[mouse] ");
+    crate::diagnostics::serial_puts(describe(&mouse));
+    crate::diagnostics::serial_puts("\n");
     INITIALIZED.store(true, Ordering::Release);
     mouse.present
 }
@@ -416,8 +421,8 @@ const BUTTON_NAMES: [&str; 5] = ["left", "right", "middle", "back", "forward"];
 
 fn describe(mouse: &Mouse) -> &'static str {
     match (mouse.usb, mouse.present, mouse.wheel) {
-        (true, true, _) => "USB HID + PS/2, 5-button, wheel",
-        (true, false, _) => "USB HID, 5-button, wheel",
+        (true, true, _) => "USB HID + PS/2",
+        (true, false, _) => "USB HID",
         (false, true, true) if mouse.explorer => "PS/2 IntelliMouse, 5-button, wheel",
         (false, true, true) => "PS/2 IntelliMouse, wheel",
         (false, true, false) => "PS/2, 3-button",
@@ -436,17 +441,17 @@ pub fn usb_report(report: &[u8], length: usize) {
         return;
     }
     let buttons = report[0] & 0x1F;
-    let wheel = if length >= 4 { report[3] as i8 as i32 } else { 0 };
-    usb_input(buttons, report[1] as i8 as i32, report[2] as i8 as i32, wheel);
+    let wheel = report.get(3).filter(|_| length >= 4).map_or(0, |b| *b as i8 as i32);
+    usb_input(buttons, report[1] as i8 as i32, report[2] as i8 as i32, wheel, 0);
 }
 
 /// Feed an already-decoded HID report. `buttons` uses the same bit order as
 /// `BUTTON_LEFT` through `BUTTON_FORWARD`; `dx`/`dy` are screen deltas.
-pub fn usb_input(buttons: u8, dx: i32, dy: i32, wheel: i32) {
+pub fn usb_input(buttons: u8, dx: i32, dy: i32, wheel: i32, pan: i32) {
     crate::interrupt::without_interrupts(|| {
         let mut mouse = MOUSE.lock();
         mouse.usb = true;
-        mouse.apply(buttons & 0x1F, dx, dy, wheel);
+        mouse.apply(buttons & 0x1F, dx, dy, wheel, pan);
     });
 }
 

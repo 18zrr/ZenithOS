@@ -121,23 +121,23 @@ pub fn parse_mouse(descriptor: &[u8]) -> Option<MouseLayout> {
                             layout.button_offset = bit;
                         }
                         layout.buttons = layout.buttons.saturating_add(1).min(5);
-                    } else if usage_page == 0x01 {
+                    } else if usage_page == 0x01 || usage_page == 0x0c {
                         let field = Field {
                             offset: bit,
                             size: report_size,
                             signed: logical_min < 0,
                         };
-                        match usage {
-                            0x30 if !layout.x.present() => {
+                        match (usage_page, usage) {
+                            (1, 0x30) if !layout.x.present() => {
                                 layout.x = field;
                                 saw_x = true;
                             }
-                            0x31 if !layout.y.present() => {
+                            (1, 0x31) if !layout.y.present() => {
                                 layout.y = field;
                                 saw_y = true;
                             }
-                            0x38 if !layout.wheel.present() => layout.wheel = field,
-                            0x36 if !layout.pan.present() => layout.pan = field,
+                            (1, 0x38) if !layout.wheel.present() => layout.wheel = field,
+                            (1, 0x36) | (0x0c, 0x238) if !layout.pan.present() => layout.pan = field,
                             _ => {}
                         }
                     }
@@ -148,7 +148,6 @@ pub fn parse_mouse(descriptor: &[u8]) -> Option<MouseLayout> {
             }
             0x90 | 0xB0 => {
                 // Output and feature reports do not appear in input packets.
-                bit = bit.saturating_add(report_size as u16 * report_count);
                 usage_count = 0;
                 usage_range = false;
             }
@@ -205,12 +204,12 @@ pub fn parse_mouse(descriptor: &[u8]) -> Option<MouseLayout> {
 fn read_bits(report: &[u8], offset: u16, size: u8) -> u32 {
     let mut value = 0u32;
     for bit in 0..size as u16 {
-        let position = offset + bit;
+        let position = usize::from(offset) + usize::from(bit);
         let byte = position / 8;
-        if byte as usize >= report.len() {
+        if byte >= report.len() {
             break;
         }
-        if report[byte as usize] & (1 << (position % 8)) != 0 {
+        if report[byte] & (1 << (position % 8)) != 0 {
             value |= 1 << bit;
         }
     }
@@ -256,6 +255,12 @@ pub fn decode_mouse(layout: &MouseLayout, report: &[u8]) -> Option<MouseReport> 
     } else {
         report
     };
+    let bits = body.len().saturating_mul(8);
+    if [layout.x, layout.y, layout.wheel, layout.pan].iter().any(|field|
+        field.present() && usize::from(field.offset) + usize::from(field.size) > bits)
+        || usize::from(layout.button_offset) + usize::from(layout.buttons) > bits {
+        return None;
+    }
 
     let mut buttons = 0u8;
     for button in 0..layout.buttons.min(5) {
@@ -341,6 +346,18 @@ mod tests {
     fn rejects_wrong_report_id() {
         let layout = parse_mouse(FULL).expect("layout");
         assert!(decode_mouse(&layout, &[0x01, 0, 0, 0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn decodes_consumer_horizontal_pan_after_a_feature_report() {
+        let mut descriptor = BASIC[..BASIC.len() - 2].to_vec();
+        descriptor.extend_from_slice(&[0xb1, 0x02, 0x05, 0x0c, 0x0a, 0x38, 0x02,
+                                       0x81, 0x06, 0xc0, 0xc0]);
+        let layout = parse_mouse(&descriptor).unwrap();
+        assert_eq!(layout.pan.offset, 32);
+        let decoded = decode_mouse(&layout, &[0, 0, 0, 1, 0xff]).unwrap();
+        assert_eq!((decoded.wheel, decoded.pan), (1, -1));
+        assert!(decode_mouse(&layout, &[0, 0, 0]).is_none());
     }
 
     #[test]
