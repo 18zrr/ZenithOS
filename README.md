@@ -32,6 +32,19 @@ write the new file and its extent tree to free blocks before committing the
 inode, so a replacement needs temporary free space for the new contents.
 The disk format is still Zenith FS v5. See the [release notes](RELEASE_NOTES.md).
 
+## Aurora screenshot gallery
+
+These screenshots are from **ZenithOS v0.4.0 — Aurora**, a development build
+running in QEMU at 1280×800. The current published release is
+[ZenithOS v0.3.2 — Nightfall](https://github.com/18zrr/ZenithOS/releases/tag/v0.3.2).
+Select an image to view it at full size.
+
+| Zenith Settings | Zenith Monitor |
+| --- | --- |
+| [![Settings showing the boot path, CPU vendor and Monitor sampling interval](docs/screenshots/aurora/settings.png)](docs/screenshots/aurora/settings.png) | [![Monitor showing task CPU shares, kernel heap history and mounted storage](docs/screenshots/aurora/monitor.png)](docs/screenshots/aurora/monitor.png) |
+| **Zenith Explorer** | **Zenith Control Center** |
+| [![Explorer with two directory tabs and files on the Zenith FS volume](docs/screenshots/aurora/explorer.png)](docs/screenshots/aurora/explorer.png) | [![Control Center showing network status, power actions and a file creation notification](docs/screenshots/aurora/control-center.png)](docs/screenshots/aurora/control-center.png) |
+
 ## Layout
 
 ```
