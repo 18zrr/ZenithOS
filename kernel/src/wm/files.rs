@@ -34,6 +34,8 @@ pub(super) struct Files {
     transfer: Option<transfer::Transfer>,
     entries: Vec<(String, bool)>,
     selected: usize,
+    last_click: Option<(usize, i32, i32, u64)>,
+    editor_first: Option<usize>,
     mode: Mode,
     input: String,
     status: String,
@@ -60,6 +62,8 @@ impl Files {
             transfer: None,
             entries: Vec::new(),
             selected: 0,
+            last_click: None,
+            editor_first: None,
             mode: Mode::Browse,
             input: String::new(),
             status: String::new(),
@@ -138,6 +142,7 @@ impl Files {
     }
 
     pub fn refresh(&mut self) {
+        self.last_click = None;
         self.marked.clear();
         let selected = self.entries.get(self.selected).map(|(n,_)| n.clone());
         self.mode = Mode::Browse;
@@ -177,7 +182,7 @@ impl Files {
             1 if *folder => {
                 self.navigate(path);
             }
-            1 => {
+            9 if !folder => {
                 self.status = match volume(|fs| {
                     let id = fs.resolve(&path)?;
                     Ok((fs.stat(id)?.0, fs.read_range(id, 0, 96)?))
@@ -203,22 +208,31 @@ impl Files {
             }
             5 => self.status = "Select a file to copy".into(),
             6 => self.mode = Mode::Delete,
-            7 if !folder => {
+            1 | 7 if !folder => {
+                if index == 1 && name.rsplit_once('.').is_some_and(|(_, ext)| {
+                    !["txt", "md", "log", "cfg", "conf", "ini", "csv"].iter()
+                        .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+                }) {
+                    self.status = "No application for this file type".into();
+                    return;
+                }
                 match volume(|fs| {
                     let id = fs.resolve(&path)?;
+                    if fs.stat(id)?.1 { return Err(FsError::InvalidPath); }
                     fs.read_range(id, 0, NOTE_LIMIT + 1)
                 }) {
                     Ok(data) if data.len() <= NOTE_LIMIT && data.iter().all(|b| matches!(b, b'\n' | 32..=126)) => {
                         self.input = String::from_utf8(data).unwrap();
-                        self.cursor = self.input.len();
+                        self.cursor = if index == 1 { 0 } else { self.input.len() };
                         self.original.clear();
                         self.original.push_str(&self.input);
                         self.anchor = None;
                         self.mode = Mode::Edit;
+                        self.editor_first = None;
                         self.status = "Ctrl+S: save   Ctrl+Shift+S: Save As   Esc: close".into();
                     }
-                    Ok(_) => self.status = "Edit supports ASCII notes up to 4 KiB (LF newlines)".into(),
-                    Err(e) => self.status = e.to_string(),
+                    Ok(_) => self.status = "Cannot open: requires ASCII text, LF, at most 4 KiB".into(),
+                    Err(e) => self.status = format!("Cannot open file: {e}"),
                 }
             }
             7 => self.status = "Select a text file to edit".into(),
@@ -298,6 +312,13 @@ impl Files {
     }
 
     pub fn key(&mut self, event: KeyEvent, w: &Window) {
+        self.last_click = None;
+        self.editor_first = None;
+        self.handle_key(event, w);
+        if self.mode == Mode::Browse { self.reveal_selection(&self.pane(w)); }
+    }
+
+    fn handle_key(&mut self, event: KeyEvent, w: &Window) {
         let key = event.key;
         if self.mode == Mode::Search {
             match key {
@@ -469,6 +490,7 @@ impl Files {
             Key::Char(b'c') => self.tool(5),
             Key::Char(b'e') => self.tool(7),
             Key::Char(b'p') => self.tool(8),
+            Key::Char(b'v') => self.tool(9),
             Key::Delete => self.tool(6),
             _ => {}
         }
@@ -494,14 +516,22 @@ impl Files {
         (
             y,
             rows * cols,
-            (self.selected / cols).saturating_sub(rows.saturating_sub(1)) * cols,
+            self.tab.first_row.min(self.entries.len().div_ceil(cols).saturating_sub(rows)) * cols,
         )
+    }
+    fn reveal_selection(&mut self, w: &Window) {
+        let (_, capacity, first) = self.list_geometry(w);
+        let cols = self.columns(w);
+        let row = self.selected / cols;
+        let rows = (capacity / cols).max(1);
+        self.tab.first_row = (first / cols).clamp((row + 1).saturating_sub(rows), row);
     }
     fn columns(&self, w: &Window) -> usize {
         if self.tab.grid { ((w.w - 24) / 132).max(1) } else { 1 }
     }
     fn cell_height(&self) -> i32 { if self.tab.grid { 44 } else { 24 } }
     pub fn click(&mut self, w: &Window, x: i32, y: i32) {
+        let previous = self.last_click.take();
         if self.mode != Mode::Browse {
             return;
         }
@@ -514,6 +544,7 @@ impl Files {
         if self.navigation_click(w, x, y) { return; }
         if let Some(i) = Self::buttons(w).iter().position(|r| w.h >= 325 && r.contains(x, y)) {
             self.tool(i);
+            if self.mode == Mode::Browse { self.reveal_selection(w); }
             return;
         }
         let (top, rows, first) = self.list_geometry(w);
@@ -530,16 +561,62 @@ impl Files {
             let i = first + ((y - top) / self.cell_height()) as usize * cols + col;
             if i < self.entries.len() {
                 self.selected = i;
+                let now = timer::ticks();
+                if previous.is_some_and(|(entry, px, py, time)| {
+                    entry == i && now.wrapping_sub(time) <= 50
+                        && x.abs_diff(px) <= 4 && y.abs_diff(py) <= 4
+                }) {
+                    self.tool(1);
+                } else {
+                    self.last_click = Some((i, x, y, now));
+                }
             }
         }
     }
 
-    pub fn wheel(&mut self, lines: i32) {
-        if self.mode == Mode::Browse {
-            self.selected = (self.selected as i32 - lines * 3)
-                .clamp(0, self.entries.len().saturating_sub(1) as i32)
-                as usize;
-        }
+    pub fn cancel_click(&mut self) { self.last_click = None; }
+
+    pub fn wheel(&mut self, window: &Window, x: i32, y: i32, lines: i32) -> bool {
+        self.last_click = None;
+        let w = self.pane(window);
+        let (first, max) = match self.mode {
+            Mode::Browse => {
+                let (top, capacity, first) = self.list_geometry(&w);
+                let cols = self.columns(&w);
+                if x < w.x + 12 || y < top || y >= w.y + w.h as i32 - 30 || capacity == 0 {
+                    return false;
+                }
+                (first / cols, self.entries.len().div_ceil(cols).saturating_sub(capacity / cols))
+            }
+            Mode::Edit => {
+                let (cols, rows) = Self::editor_geometry(&w);
+                let last = Self::text_position(&self.input, cols).0;
+                let cursor = Self::text_position(&self.input[..self.cursor], cols).0;
+                let max = (last + 1).saturating_sub(rows);
+                (self.editor_first.unwrap_or((cursor + 1).saturating_sub(rows)).min(max), max)
+            }
+            _ => return false,
+        };
+        let row = (first as i32 - lines * 3).clamp(0, max as i32) as usize;
+        if row == first { return false; }
+        if self.mode == Mode::Edit { self.editor_first = Some(row); } else { self.tab.first_row = row; }
+        true
+    }
+
+    fn editor_geometry(w: &Window) -> (usize, usize) {
+        ((w.w.saturating_sub(24) / COL_PITCH).max(1),
+         (w.h.saturating_sub(TITLEBAR_H + 76) / ROW_PITCH).max(1))
+    }
+
+    fn advance(row: &mut usize, col: &mut usize, b: u8, cols: usize) {
+        if b == b'\n' || *col + 1 == cols { *row += 1; *col = 0; }
+        else { *col += 1; }
+    }
+
+    fn text_position(text: &str, cols: usize) -> (usize, usize) {
+        let (mut row, mut col) = (0, 0);
+        for b in text.bytes() { Self::advance(&mut row, &mut col, b, cols); }
+        (row, col)
     }
     pub fn draw(&self, f: &mut [u32], stride: usize, h: usize, w: &Window) {
         self.sidebar(w, |r, name, _| {
@@ -589,18 +666,12 @@ impl Files {
         if self.mode == Mode::Edit {
             if self.dirty() { draw_text(f,stride,h,left,path_y,right,"*",ACCENTS[0]); }
             draw_text(f, stride, h, left+16, path_y, right, &self.entries[self.selected].0, FG);
-            let rows = (w.h.saturating_sub(TITLEBAR_H + 76) / ROW_PITCH).max(1);
-            let cols = (w.w.saturating_sub(24) / COL_PITCH).max(1);
-            let position = |row: &mut usize, col: &mut usize, byte| {
-                if byte == b'\n' { *row += 1; *col = 0; }
-                else { *col += 1; if *col == cols { *row += 1; *col = 0; } }
-            };
-            let (mut row, mut col) = (0usize, 0usize);
-            for &b in &self.input.as_bytes()[..self.cursor] { position(&mut row, &mut col, b); }
-            let first = row.saturating_sub(rows - 1);
+            let (cols, rows) = Self::editor_geometry(w);
+            let (cursor_row, cursor_col) = Self::text_position(&self.input[..self.cursor], cols);
+            let first = self.editor_first.map_or_else(|| (cursor_row + 1).saturating_sub(rows),
+                |r| r.min((Self::text_position(&self.input, cols).0 + 1).saturating_sub(rows)));
             let text_y = path_y + 30;
-            let (cx, cy) = (left + (col * COL_PITCH) as i32, text_y + ((row-first)*ROW_PITCH) as i32);
-            row = 0; col = 0;
+            let (mut row, mut col) = (0, 0);
             let selection = self.selection();
             for (index,&b) in self.input.as_bytes().iter().enumerate() {
                 if row >= first + rows { break; }
@@ -614,9 +685,12 @@ impl Files {
                         fb::draw_glyph_to(f, stride, h, x as usize, y as usize, b, FG);
                     }
                 }
-                position(&mut row, &mut col, b);
+                Self::advance(&mut row, &mut col, b, cols);
             }
-            fill(f,stride,h,cx,cy,1,ROW_PITCH,ACCENTS[0]);
+            if (first..first + rows).contains(&cursor_row) {
+                fill(f,stride,h,left + (cursor_col * COL_PITCH) as i32,
+                     text_y + ((cursor_row - first) * ROW_PITCH) as i32,1,ROW_PITCH,ACCENTS[0]);
+            }
             draw_text(f,stride,h,left,w.y+w.h as i32-29,right,&self.status,MUTED);
             return;
         }

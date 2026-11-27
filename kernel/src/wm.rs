@@ -151,18 +151,22 @@ struct Window {
 }
 
 impl Window {
-    fn max_scroll(self) -> usize {
+    fn max_scroll(self, page: Page) -> usize {
         let content: usize = match self.kind {
-            WindowKind::Settings => if self.w >= 560 { 300 } else { 420 },
-            WindowKind::Control => 610,
-            WindowKind::Monitor => 14 + 126 + 146 + 126 + 222 + 132 + 12,
+            WindowKind::Settings => settings::content_height(&self, page),
+            WindowKind::Control => {
+                let notices = crate::notifications::count();
+                // Empty history has one line; each notice occupies two.
+                12 + 278 + if notices == 0 { 20 } else { notices * 40 } + 12
+            }
+            WindowKind::Monitor => 14 + 354 + 126 + 146 + 116 + 12,
             WindowKind::About => 12 + 78 + 82 + 7*24 + 20 + 12,
             _ => 0,
         };
         content.saturating_sub(self.h.saturating_sub(TITLEBAR_H + 2))
     }
 
-    fn offset(self) -> i32 { self.scroll.min(self.max_scroll()) as i32 }
+    fn offset(self, page: Page) -> i32 { self.scroll.min(self.max_scroll(page)) as i32 }
 }
 
 #[derive(Clone, Copy)]
@@ -996,23 +1000,16 @@ pub fn menu_key(event: KeyEvent) -> Action {
             invalidate();
             Action::None
         }
-        Key::Up => {
-            start_menu::move_selection(-(MenuLayout::columns(WM.lock().width) as isize));
-            invalidate();
-            Action::None
-        }
-        Key::Down => {
-            start_menu::move_selection(MenuLayout::columns(WM.lock().width) as isize);
-            invalidate();
-            Action::None
-        }
-        Key::Left => {
-            start_menu::move_selection(-1);
-            invalidate();
-            Action::None
-        }
-        Key::Right => {
-            start_menu::move_selection(1);
+        Key::Up | Key::Down | Key::Left | Key::Right => {
+            let wm = WM.lock();
+            let layout = MenuLayout::new(wm.width, wm.height);
+            let step = match event.key {
+                Key::Up => -(layout.cols as isize),
+                Key::Down => layout.cols as isize,
+                Key::Left => -1,
+                _ => 1,
+            };
+            start_menu::move_selection(step, layout.cols, layout.rows);
             invalidate();
             Action::None
         }
@@ -1120,11 +1117,13 @@ pub fn scroll_key(key: Key) -> bool {
     if !matches!(key, Key::PageUp | Key::PageDown) { return false; }
     let mut wm = WM.lock();
     let Some(i) = wm.top_visible() else { return false };
+    let settings_page = wm.settings_page;
     let w = wm.windows[i].as_mut().unwrap();
-    if w.max_scroll() == 0 { return false; }
+    let max = w.max_scroll(settings_page);
+    if max == 0 { return false; }
     let page = (w.h - TITLEBAR_H - 24) as i32;
-    w.scroll = (w.offset() + if key == Key::PageDown {page} else {-page})
-        .clamp(0, w.max_scroll() as i32) as usize;
+    w.scroll = (w.scroll.min(max) as i32 + if key == Key::PageDown {page} else {-page})
+        .clamp(0, max as i32) as usize;
     invalidate();
     true
 }
@@ -1138,6 +1137,12 @@ pub fn pump() -> Action {
 
     let mut action = Action::None;
     while let Some(event) = mouse::take_event() {
+        if event.kind == mouse::EVENT_BUTTON_DOWN
+            && !(event.button == mouse::BUTTON_LEFT && !start_menu::is_open() && wm.context.is_none()
+                && matches!(wm.hit_test(event.x,event.y), Hit::Body(i)
+                    if wm.windows[i].is_some_and(|w| w.kind == WindowKind::Files))) {
+            wm.files.cancel_click();
+        }
         if LOGGED_OUT.load(Ordering::Acquire) {
             if event.kind == mouse::EVENT_BUTTON_DOWN && event.button == mouse::BUTTON_LEFT
                 && welcome_button(wm.width, wm.height).contains(event.x, event.y) {
@@ -1178,15 +1183,27 @@ pub fn pump() -> Action {
                 }
             }
             mouse::EVENT_WHEEL => {
-                if !start_menu::is_open() {
+                if wm.context.is_some() { continue; }
+                if start_menu::is_open() {
+                    let menu = MenuLayout::new(wm.width, wm.height);
+                    if menu.grid.contains(event.x, event.y)
+                        && start_menu::scroll(event.scroll, menu.cols, menu.rows, menu.count) {
+                        invalidate();
+                    }
+                } else if !TaskbarLayout::new(wm.width, wm.height).panel.contains(event.x,event.y) {
                     if let Some(i) = wm.window_at(event.x,event.y) {
-                        let w = wm.windows[i].as_mut().unwrap();
+                        let w = wm.windows[i].unwrap();
+                        if event.y < w.y + TITLEBAR_H as i32 { continue; }
                         if w.kind == WindowKind::Terminal {
                             fb::scroll_lines(event.scroll * 3);
                         } else if w.kind == WindowKind::Files {
-                            wm.files.wheel(event.scroll);
+                            if !wm.files.wheel(&w, event.x, event.y, event.scroll) { continue; }
                         } else {
-                            w.scroll = (w.offset()-event.scroll*42).clamp(0,w.max_scroll() as i32) as usize;
+                            let max = w.max_scroll(wm.settings_page);
+                            let old = w.scroll.min(max) as i32;
+                            let offset = (old-event.scroll*42).clamp(0,max as i32);
+                            if offset == old { continue; }
+                            wm.windows[i].as_mut().unwrap().scroll = offset as usize;
                         }
                         invalidate();
                     }
@@ -1533,9 +1550,12 @@ impl Wm {
                 self.browser_buttons &= !event.button;
                 browser::pointer(4, button, x, y);
             }
-            mouse::EVENT_WHEEL => {
+            mouse::EVENT_WHEEL | mouse::EVENT_PAN => {
+                let button = if event.kind == mouse::EVENT_PAN {
+                    if event.scroll > 0 { 7 } else { 6 }
+                } else if event.scroll > 0 { 4 } else { 5 };
                 for _ in 0..event.scroll.unsigned_abs().min(8) {
-                    browser::pointer(5, if event.scroll > 0 { 4 } else { 5 }, x, y);
+                    browser::pointer(5, button, x, y);
                 }
             }
             _ => return false,
@@ -1673,7 +1693,7 @@ impl Wm {
                 self.focus_index(index);
                 if let Some(w) = self.windows[index] {
                     if w.kind == WindowKind::Files { self.files.click(&w,x,y); }
-                    if w.kind == WindowKind::Control { return self.control_click(&w, x, y + w.offset()); }
+                    if w.kind == WindowKind::Control { return self.control_click(&w, x, y + w.offset(self.settings_page)); }
                 }
                 invalidate();
             }
@@ -1779,7 +1799,7 @@ impl Wm {
                 for (index, rect) in menu.session.iter().enumerate() {
                     if rect.contains(x, y) { return Hit::Session(index); }
                 }
-                for entry in 0..menu.count {
+                for entry in menu.visible.clone() {
                     if menu.tiles[entry].contains(x, y) {
                         return Hit::MenuApp(menu.apps[entry]);
                     }
@@ -1830,7 +1850,7 @@ impl Wm {
                 return Hit::Resize(index);
             }
             if window.kind == WindowKind::Settings {
-                let y = y + window.offset();
+                let y = y + window.offset(self.settings_page);
                 if let Some(page) = settings::page_at(&window, x, y) {
                     return Hit::SettingsPage(page);
                 }
@@ -2048,18 +2068,19 @@ impl Wm {
                 let top = (y + TITLEBAR_H as i32).clamp(0,height as i32);
                 let bottom = (y + h as i32 - 2).clamp(top,height as i32);
                 let body = &mut frame[top as usize*stride..bottom as usize*stride];
-                let local = Window { y: y-top-window.offset(), ..*window };
+                let max = window.max_scroll(self.settings_page);
+                let offset = window.scroll.min(max);
+                let local = Window { y: y-top-offset as i32, ..*window };
                 match window.kind {
                     WindowKind::Control => self.draw_control(body, &local, mouse_x, mouse_y - top),
                     WindowKind::Monitor => self.draw_monitor(body,&local),
                     WindowKind::Settings => self.draw_settings(body,&local,mouse_x,mouse_y-top),
                     _ => self.draw_about(body,&local),
                 }
-                let max = window.max_scroll();
                 if max > 0 {
                     let track = h - TITLEBAR_H - 16;
                     let thumb = (track*track/(track+max)).max(16);
-                    let pos = window.offset() as usize * (track-thumb) / max;
+                    let pos = offset * (track-thumb) / max;
                     rounded_rect(frame,stride,height,x+w as i32-8,y+(TITLEBAR_H+8+pos) as i32,
                                  3,thumb,1,DIM);
                 }
@@ -2887,13 +2908,16 @@ impl Wm {
 
         rounded_rect(frame,stride,height,panel.x+8,panel.y+8,panel.w-16,43,10,TITLE_ACTIVE);
         logo::draw(frame, stride, height, panel.x + 16, panel.y + 10, 36);
+        let version = concat!("v", env!("CARGO_PKG_VERSION"));
+        let version_right = panel.right() - 16;
+        let version_x = version_right - ui_art::text_width(version);
         draw_text(
             frame,
             stride,
             height,
             panel.x + 56,
             panel.y + 18,
-            panel.right(),
+            version_x - 12,
             concat!(env!("ZENITH_CODENAME"), "   /   Launchpad"),
             FG,
         );
@@ -2901,10 +2925,10 @@ impl Wm {
             frame,
             stride,
             height,
-            panel.right() - 24 - 10 * COL_PITCH as i32,
+            version_x,
             panel.y + 20,
-            panel.right() - 16,
-            env!("ZENITH_RELEASE_ASCII"),
+            version_right,
+            version,
             DIM,
         );
 
@@ -3032,7 +3056,7 @@ impl Wm {
         }
 
         let selected = if start_menu::session().is_none() { start_menu::selection() } else { usize::MAX };
-        for entry in 0..menu.count {
+        for entry in menu.visible.clone() {
             let rect = menu.tiles[entry];
             let app = menu.apps[entry];
             let hovered = rect.contains(mouse_x, mouse_y);
@@ -3151,6 +3175,10 @@ impl TaskbarLayout {
 }
 
 struct MenuLayout {
+    grid: Rect,
+    cols: usize,
+    rows: usize,
+    visible: core::ops::Range<usize>,
     session: [Rect; 3],
     panel: Rect,
     search: Rect,
@@ -3172,11 +3200,14 @@ impl MenuLayout {
         let mut tiles = [Rect::new(0, 0, 0, 0); start_menu::APP_COUNT];
         let gap = 6usize;
         let tile_w = panel_w.saturating_sub(40 + (cols-1)*gap) / cols;
-        let rows = start_menu::APP_COUNT.div_ceil(cols);
-        let tile_h = 88.min(panel_h.saturating_sub(138 + 62 + (rows-1)*gap) / rows);
-        for entry in 0..count {
+        let grid_h = panel_h.saturating_sub(138 + 62);
+        let rows = ((grid_h + gap) / (48 + gap)).clamp(1, start_menu::APP_COUNT.div_ceil(cols));
+        let tile_h = 88.min(grid_h.saturating_sub((rows-1)*gap) / rows);
+        let first_row = start_menu::first_row().min(count.div_ceil(cols).saturating_sub(rows));
+        let visible = first_row * cols..count.min((first_row + rows) * cols);
+        for entry in visible.clone() {
             let column = entry % cols;
-            let row = entry / cols;
+            let row = entry / cols - first_row;
             tiles[entry] = Rect::new(
                 panel_x + 20 + (column * (tile_w + gap)) as i32,
                 panel_y + 138 + (row * (tile_h + gap)) as i32,
@@ -3185,6 +3216,8 @@ impl MenuLayout {
             );
         }
         MenuLayout {
+            grid: Rect::new(panel_x + 20, panel_y + 138, panel_w - 40, grid_h),
+            cols, rows, visible,
             session: core::array::from_fn(|i| {
                 let w = (panel_w-60)/3;
                 Rect::new(panel_x+20+(i*(w+10)) as i32, panel_y+panel_h as i32-49, w, 40)

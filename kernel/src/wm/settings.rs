@@ -73,6 +73,23 @@ pub(super) fn page_at(window: &Window, x: i32, y: i32) -> Option<Page> {
         .map(|(_, p)| p.0)
 }
 
+// Leave room for whichever extends farther: the last navigation tab or the
+// selected page (including the status line below System and Appearance).
+pub(super) fn content_height(window: &Window, page: Page) -> usize {
+    let page_height = match page {
+        Page::System | Page::Appearance => 270,
+        Page::Display => DISPLAY_CARD_H,
+        Page::Storage => 162,
+        Page::Devices | Page::About => 150,
+        Page::Input => 116,
+        Page::Network => 166,
+    };
+    let body_top = window.y + TITLEBAR_H as i32;
+    let tabs_bottom = tab(window, PAGES.len() - 1).y + 28;
+    let page_bottom = content(window).y + TITLEBAR_H as i32 + 14 + page_height as i32;
+    (tabs_bottom.max(page_bottom) - body_top) as usize + 12
+}
+
 pub(super) fn interval_button(window: &Window) -> Rect {
     Rect::new(window.x + 30, window.y + TITLEBAR_H as i32 + 172, 230, 28)
 }

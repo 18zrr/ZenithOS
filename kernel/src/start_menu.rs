@@ -22,6 +22,7 @@ struct State {
     session: Option<usize>,
     open: bool,
     selection: usize,
+    first_row: usize,
     search: [u8; SEARCH_CAPACITY],
     search_len: usize,
 }
@@ -30,6 +31,7 @@ static STATE: SpinLock<State> = SpinLock::new(State {
     session: None,
     open: false,
     selection: 0,
+    first_row: 0,
     search: [0; SEARCH_CAPACITY],
     search_len: 0,
 });
@@ -45,6 +47,7 @@ pub fn open() {
     state.session = None;
     state.open = true;
     state.selection = 0;
+    state.first_row = 0;
     state.search = [0; SEARCH_CAPACITY];
     state.search_len = 0;
 }
@@ -60,6 +63,7 @@ pub fn toggle() -> bool {
     state.open = !state.open;
     if state.open {
         state.selection = 0;
+        state.first_row = 0;
         state.search = [0; SEARCH_CAPACITY];
         state.search_len = 0;
     }
@@ -127,7 +131,7 @@ pub fn search_text() -> ([u8; SEARCH_CAPACITY], usize) {
 }
 
 /// Move the selection by `delta`, clamped to the filtered list.
-pub fn move_selection(delta: isize) {
+pub fn move_selection(delta: isize, cols: usize, rows: usize) {
     let mut state = STATE.lock();
     let query = &state.search[..state.search_len];
     let count = APPS
@@ -140,6 +144,24 @@ pub fn move_selection(delta: isize) {
     }
     let current = state.selection as isize;
     state.selection = (current + delta).clamp(0, count as isize - 1) as usize;
+    let row = state.selection / cols;
+    state.first_row = state.first_row.clamp((row + 1).saturating_sub(rows), row);
+}
+
+/// First visible application row in the Launchpad grid.
+pub fn first_row() -> usize { STATE.lock().first_row }
+
+/// Scroll complete tile rows while keeping keyboard activation on-screen.
+pub fn scroll(lines: i32, cols: usize, rows: usize, count: usize) -> bool {
+    let mut state = STATE.lock();
+    let max = count.div_ceil(cols).saturating_sub(rows);
+    let row = (state.first_row as i32 - lines).clamp(0, max as i32) as usize;
+    if row == state.first_row { return false; }
+    state.first_row = row;
+    if count != 0 {
+        state.selection = state.selection.clamp(row * cols, ((row + rows) * cols).min(count) - 1);
+    }
+    true
 }
 
 /// Select a filtered-list entry by index (used by mouse clicks).
@@ -184,6 +206,7 @@ pub fn type_char(byte: u8) -> bool {
     state.search[index] = byte;
     state.search_len = index + 1;
     state.selection = 0;
+    state.first_row = 0;
     true
 }
 
@@ -195,6 +218,7 @@ pub fn backspace() -> bool {
         state.search[index] = 0;
         state.search_len = index;
         state.selection = 0;
+        state.first_row = 0;
         true
     } else {
         false

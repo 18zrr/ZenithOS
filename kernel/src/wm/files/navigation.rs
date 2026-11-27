@@ -10,6 +10,7 @@ pub(super) struct Tab {
     back: Vec<String>,
     forward: Vec<String>,
     selection: usize,
+    pub(super) first_row: usize,
 }
 
 impl Tab {
@@ -22,6 +23,7 @@ impl Tab {
             back: Vec::new(),
             forward: Vec::new(),
             selection: 0,
+            first_row: 0,
         }
     }
 }
@@ -70,6 +72,7 @@ impl Files {
                 let previous = core::mem::replace(&mut self.tab.dir, path);
                 self.tab.query.clear();
                 self.selected = 0;
+                self.tab.first_row = 0;
                 self.set_listing(entries);
                 Some(previous)
             }

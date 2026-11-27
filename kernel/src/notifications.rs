@@ -45,6 +45,10 @@ pub(crate) fn snapshot() -> [Notice; 8] {
     *HISTORY.lock()
 }
 
+pub(crate) fn count() -> usize {
+    HISTORY.lock().iter().take_while(|n| !n.source.is_empty()).count()
+}
+
 pub(crate) fn dismiss() {
     let mut history = HISTORY.lock();
     history.rotate_left(1);
