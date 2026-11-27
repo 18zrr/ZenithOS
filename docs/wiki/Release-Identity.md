@@ -1,6 +1,6 @@
 # Release identity
 
-Current identity: **ZenithOS v0.3.2 — Nightfall**.
+Current development identity: **ZenithOS v0.4.0 — Aurora**.
 
 The OS version is `workspace.package.version` in the root `Cargo.toml`.
 `kernel/Cargo.toml` inherits it. The official major/minor codename registry is
@@ -15,9 +15,9 @@ screens use a hyphen in place of the canonical title's em dash.
 `python3 tools/release_metadata.py title` prints the official GitHub release
 title. The `iso`, `bios` and `uefi` fields print canonical artifact filenames:
 
-- `zenithos-v0.3.2-nightfall-x86_64.iso`
-- `zenithos-v0.3.2-nightfall-x86_64-bios.img`
-- `zenithos-v0.3.2-nightfall-x86_64-uefi.img`
+- `zenithos-v0.4.0-aurora-x86_64.iso`
+- `zenithos-v0.4.0-aurora-x86_64-bios.img`
+- `zenithos-v0.4.0-aurora-x86_64-uefi.img`
 
 Image builders retain the short compatibility copies for existing launchers.
 Git tags remain semantic versions, e.g. `v0.3.1`.

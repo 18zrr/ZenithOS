@@ -16,15 +16,15 @@ the written value. This is a verified test in QEMU.
 
 ## Heap allocator
 
-`kernel/src/allocator.rs` provides a global bump allocator over a static 2 MiB
-region. It is sufficient for the kernel's `Vec`/`String` usage and does not
-reclaim individual blocks.
+`kernel/src/allocator.rs` manages a fixed 128 MiB region with an aligned,
+coalescing free list. Allocation and deallocation mask interrupts while the
+heap lock is held. `tasks` reports occupied heap bytes, including alignment.
 
 ## Current limits
 
 - The page-fault recovery is special-cased to the `0x600000` test page.
 - No general page allocator or arbitrary fault recovery exists.
-- No kernel heap deallocation or compaction.
+- No compaction or dynamic expansion of the kernel heap.
 - No user/kernel address-space separation; userland is not running in the OS.
 
 See [Kernel](Kernel.md) for the broader picture.

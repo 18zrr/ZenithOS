@@ -1,4 +1,8 @@
-# ZenithOS v0.3.2 — Nightfall
+# ZenithOS v0.4.0 — Aurora
+
+Aurora is in development. The latest published version is
+[ZenithOS v0.3.2 — Nightfall](https://github.com/18zrr/ZenithOS/releases/tag/v0.3.2).
+The [Aurora implementation plan](docs/aurora-development.md) tracks the milestone.
 
 Zenith OS is an independent x86_64 operating system written in Rust, with
 assembly for the boot entry points. It uses a custom monolithic kernel, a
@@ -6,14 +10,26 @@ custom filesystem (Zenith FS), and a custom graphical environment (Zenith UI).
 
 Release identity comes from `workspace.package.version` in `Cargo.toml` and
 `release-codenames.txt`. Patch releases retain their series codename.
-Nightfall is the 0.3.x release codename; Zenith UI is the desktop environment
+Aurora is the 0.4.x release codename; Zenith UI is the desktop environment
 and Afterglow is its theme. See [release policy](AGENTS.md).
 
-Image builders produce `zenithos-v0.3.2-nightfall-x86_64.iso`,
-`zenithos-v0.3.2-nightfall-x86_64-bios.img`, and
-`zenithos-v0.3.2-nightfall-x86_64-uefi.img`. They also copy to the existing
+Image builders produce `zenithos-v0.4.0-aurora-x86_64.iso`,
+`zenithos-v0.4.0-aurora-x86_64-bios.img`, and
+`zenithos-v0.4.0-aurora-x86_64-uefi.img`. They also copy to the existing
 `zenith.iso`, `zenith.img`, and `zenith-uefi.img` compatibility paths.
 Build metadata tools require Python 3.11 or newer.
+
+### Aurora development build
+
+Zenith Monitor graphs scheduler activity and live kernel heap use. Zenith
+Settings has eight pages, including storage and network information, and saves
+Monitor's refresh interval. Snap windows with Ctrl+Alt+Left/Right and restore
+with Ctrl+Alt+Down. The kernel now reuses freed memory.
+
+Zenith Explorer adds directory tabs, breadcrumbs, history, search, grid/list
+views and batch copy/move. F3 opens Control Center and notification history.
+The optional [native app ABI](docs/native-app-abi.md) runs a freestanding
+user-mode example; the regular desktop image retains its kernel-hosted apps.
 
 ### New in v0.3.2
 
@@ -226,7 +242,7 @@ implemented subsystems — nothing is simulated.
 - Compositing is software-only, capped at roughly 100 Hz. Resolution can be
   changed live in Settings on QEMU/VirtualBox Bochs VBE adapters; physical PCs
   use the boot-time Limine mode. There is no native GPU mode setting, monitor
-  Hz control, HiDPI scaling, multi-monitor support or window snapping.
+  Hz control, HiDPI scaling or multi-monitor support.
 - UEFI boot was verified with **512 MiB** of guest RAM. With 128 MiB the Limine
   loader itself runs out of high memory before the kernel starts.
 - e1000 RX path is written but unvalidated; no live DHCP/UDP/TCP exchange.

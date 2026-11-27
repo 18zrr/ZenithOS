@@ -4,6 +4,7 @@
 //! contiguous run of blocks with a 32-bit length, and index nodes extend the
 //! tree when a file becomes fragmented.
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -56,10 +57,12 @@ struct OnDiskSuperBlock {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct OnDiskInode {
     number: u32,
     file_type: u8,
+    // Explicitly preserve the v5 alignment byte when serializing a table.
+    padding: u8,
     permissions: u16,
     size: u64,
     links: u32,
@@ -73,7 +76,7 @@ struct OnDiskInode {
 impl OnDiskInode {
     fn empty() -> Self {
         OnDiskInode {
-            number: 0, file_type: 0, permissions: 0, size: 0, links: 0, flags: 0,
+            number: 0, file_type: 0, padding: 0, permissions: 0, size: 0, links: 0, flags: 0,
             owner: 0, group: 0,
             extent_root: [0; EXTENT_ROOT_BYTES],
             reserved: [0; INODE_SIZE - 28 - EXTENT_ROOT_BYTES],
@@ -192,7 +195,8 @@ impl<B: BlockDevice> ZenithFs<B> {
         let probe_super: OnDiskSuperBlock = unsafe { core::ptr::read_unaligned(probe.as_ptr() as *const OnDiskSuperBlock) };
         if probe_super.magic == MAGIC && probe_super.version == VERSION {
             let start = probe_super.total_blocks as usize;
-            if device.block_count() >= start + JOURNAL_BLOCKS {
+            if probe_super.block_size as usize == BLOCK_SIZE && start > DATA_START
+                && start <= device.block_count().saturating_sub(JOURNAL_BLOCKS) {
                 Journal::replay(&mut device, start)?;
             }
         }
@@ -201,18 +205,19 @@ impl<B: BlockDevice> ZenithFs<B> {
         device.read_block(0, &mut block)?;
         let disk_super: OnDiskSuperBlock = unsafe { core::ptr::read_unaligned(block.as_ptr() as *const OnDiskSuperBlock) };
         if disk_super.magic != MAGIC || disk_super.version != VERSION || disk_super.block_size as usize != BLOCK_SIZE
+            || disk_super.root_inode != ROOT_INODE
             || disk_super.total_blocks as usize <= DATA_START
             || disk_super.total_blocks as usize > device.block_count().saturating_sub(JOURNAL_BLOCKS) {
             return Err(FsError::InvalidMagicNumber);
         }
 
         let mut inodes = [OnDiskInode::empty(); INODE_COUNT];
-        for index in 0..INODE_COUNT {
-            let table = index / (BLOCK_SIZE / INODE_SIZE);
-            let offset = (index % (BLOCK_SIZE / INODE_SIZE)) * INODE_SIZE;
+        for (table, group) in inodes.chunks_mut(BLOCK_SIZE / INODE_SIZE).enumerate() {
             let mut buffer = [0u8; BLOCK_SIZE];
             device.read_block(1 + table, &mut buffer)?;
-            inodes[index] = unsafe { core::ptr::read_unaligned(buffer[offset..].as_ptr() as *const OnDiskInode) };
+            for (inode, bytes) in group.iter_mut().zip(buffer.chunks_exact(INODE_SIZE)) {
+                *inode = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<OnDiskInode>()) };
+            }
         }
 
         let mut fs = ZenithFs {
@@ -234,7 +239,39 @@ impl<B: BlockDevice> ZenithFs<B> {
             gid: 0,
         };
         fs.rebuild_allocated()?;
+        fs.validate_namespace()?;
         Ok(fs)
+    }
+
+    // v5 has neither hard links nor "."/".." records. Walking from the root
+    // must visit each live inode exactly once, even on a deeply nested volume.
+    fn validate_namespace(&mut self) -> Result<(), FsError> {
+        let mut seen = [false; INODE_COUNT];
+        seen[ROOT_INODE as usize] = true;
+        let mut directories = vec![ROOT_INODE];
+        while let Some(parent) = directories.pop() {
+            let data = self.read_directory(parent)?;
+            let mut names = BTreeSet::new();
+            for bytes in data.chunks_exact(64) {
+                let entry = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<OnDiskDirEntry>()) };
+                if entry.inode == 0 { continue; }
+                let id = entry.inode as usize; // checked by read_directory
+                let name = core::str::from_utf8(entry.name()).map_err(|_| FsError::IoError)?;
+                if seen[id] || name.is_empty() || name.contains('/') || matches!(name, "." | "..")
+                    || !names.insert(String::from(name)) {
+                    return Err(FsError::IoError);
+                }
+                seen[id] = true;
+                if entry.file_type == 1 { directories.push(entry.inode); }
+            }
+        }
+        for (id, inode) in self.inodes.iter().enumerate() {
+            if inode.links != 0 && (!seen[id] || inode.number as usize != id
+                || inode.file_type > 1 || inode.links != 1) {
+                return Err(FsError::IoError);
+            }
+        }
+        Ok(())
     }
 
     fn write_inode(device: &mut B, number: u32, inode: &OnDiskInode) -> Result<(), FsError> {
@@ -269,22 +306,6 @@ impl<B: BlockDevice> ZenithFs<B> {
         let mut block = [0u8; BLOCK_SIZE];
         block[..bytes.len()].copy_from_slice(bytes);
         self.journal.stage(0, &block)?;
-
-        let mut tables = Vec::with_capacity(INODE_TABLE_BLOCKS);
-        for table in 0..INODE_TABLE_BLOCKS {
-            let mut buffer = [0u8; BLOCK_SIZE];
-            self.device.read_block(1 + table, &mut buffer)?;
-            tables.push(buffer);
-        }
-        for index in 0..INODE_COUNT {
-            let table = index / (BLOCK_SIZE / INODE_SIZE);
-            let offset = (index % (BLOCK_SIZE / INODE_SIZE)) * INODE_SIZE;
-            let bytes = as_bytes(&self.inodes[index]);
-            tables[table][offset..offset + bytes.len()].copy_from_slice(bytes);
-        }
-        for (table, buffer) in tables.iter().enumerate() {
-            self.journal.stage((1 + table) as u32, buffer)?;
-        }
 
         let id = self.transaction_id;
         self.transaction_id += 1;
@@ -338,7 +359,20 @@ impl<B: BlockDevice> ZenithFs<B> {
         if self.needs_remount { return Err(FsError::IoError); }
         let original = self.inodes;
         let free = self.superblock.free_blocks;
-        match edit(self) {
+        let result = edit(self).and_then(|value| {
+            let per_block = BLOCK_SIZE / INODE_SIZE;
+            for (table, (before, after)) in original.chunks(per_block)
+                .zip(self.inodes.chunks(per_block)).enumerate() {
+                if before == after { continue; }
+                let mut block = [0; BLOCK_SIZE];
+                for (slot, inode) in block.chunks_exact_mut(INODE_SIZE).zip(after) {
+                    slot.copy_from_slice(as_bytes(inode));
+                }
+                self.journal.stage((1 + table) as u32, &block)?;
+            }
+            Ok(value)
+        });
+        match result {
             Ok(value) => { self.flush()?; Ok(value) }
             Err(err) => {
                 self.journal.discard();
@@ -432,9 +466,13 @@ impl<B: BlockDevice> ZenithFs<B> {
     // ---- directory operations ----------------------------------------------
 
     fn read_directory(&mut self, inode_number: u32) -> Result<Vec<u8>, FsError> {
-        let inode = self.inodes[inode_number as usize];
+        let inode = *self.inodes.get(inode_number as usize).ok_or(FsError::IoError)?;
         if inode.file_type != 1 || inode.links == 0 { return Err(FsError::FileNotFound); }
         if !self.may(&inode, Access::Read) { return Err(FsError::PermissionDenied); }
+        if inode.size == 0 || inode.size % BLOCK_SIZE as u64 != 0
+            || inode.size > (self.superblock.total_blocks * BLOCK_SIZE) as u64 {
+            return Err(FsError::IoError);
+        }
         let size = inode.size as usize;
         let mut data = Vec::with_capacity(size);
         let total = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -448,34 +486,37 @@ impl<B: BlockDevice> ZenithFs<B> {
             let remaining = size - data.len();
             data.extend_from_slice(&buffer[..remaining.min(BLOCK_SIZE)]);
         }
+        for bytes in data.chunks_exact(64) {
+            let record = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<OnDiskDirEntry>()) };
+            if record.inode == 0 { continue; }
+            let target = self.inodes.get(record.inode as usize).ok_or(FsError::IoError)?;
+            if target.links == 0 || target.file_type != record.file_type || record.inode == ROOT_INODE {
+                return Err(FsError::IoError);
+            }
+        }
         Ok(data)
     }
 
-    fn write_directory(&mut self, inode_number: u32, data: &[u8]) -> Result<(), FsError> {
-        let inode = self.inodes[inode_number as usize];
-        for logical in 0..(data.len() + BLOCK_SIZE - 1) / BLOCK_SIZE {
-            let physical = match self.map_block(&inode, logical as u32)? {
-                Some(block) => block as usize,
-                None => return Err(FsError::IoError),
-            };
-            let start = logical * BLOCK_SIZE;
-            let mut buffer = [0u8; BLOCK_SIZE];
-            if start < data.len() {
-                let end = (start + BLOCK_SIZE).min(data.len());
-                buffer[..end - start].copy_from_slice(&data[start..end]);
-            }
-            self.journal.stage(physical as u32, &buffer)?;
-        }
-        Ok(())
+    fn stage_directory_slot(&mut self, parent: u32, data: &[u8], slot: usize) -> Result<(), FsError> {
+        let logical = slot * core::mem::size_of::<OnDiskDirEntry>() / BLOCK_SIZE;
+        let inode = self.inodes[parent as usize];
+        let physical = self.map_block(&inode, logical as u32)?.ok_or(FsError::IoError)?;
+        let start = logical * BLOCK_SIZE;
+        let block = data[start..start + BLOCK_SIZE].try_into().map_err(|_| FsError::IoError)?;
+        self.journal.stage(physical as u32, block)
     }
 
     pub fn find_at(&mut self, parent: u32, name: &str) -> Option<u32> {
-        let data = self.read_directory(parent).ok()?;
+        self.lookup(parent, name).ok().flatten()
+    }
+
+    fn lookup(&mut self, parent: u32, name: &str) -> Result<Option<u32>, FsError> {
+        let data = self.read_directory(parent)?;
         for entry in data.chunks_exact(64) {
             let record: OnDiskDirEntry = unsafe { core::ptr::read_unaligned(entry.as_ptr() as *const OnDiskDirEntry) };
-            if record.inode != 0 && record.name() == name.as_bytes() { return Some(record.inode); }
+            if record.inode != 0 && record.name() == name.as_bytes() { return Ok(Some(record.inode)); }
         }
-        None
+        Ok(None)
     }
 
     pub fn find(&mut self, name: &str) -> Option<u32> { self.find_at(ROOT_INODE, name) }
@@ -487,7 +528,7 @@ impl<B: BlockDevice> ZenithFs<B> {
             if parent.file_type != 1 || !self.may(&parent, Access::Execute) {
                 return Err(FsError::PermissionDenied);
             }
-            current = self.find_at(current, component).ok_or(FsError::FileNotFound)?;
+            current = self.lookup(current, component)?.ok_or(FsError::FileNotFound)?;
         }
         Ok(current)
     }
@@ -508,15 +549,15 @@ impl<B: BlockDevice> ZenithFs<B> {
     }
 
     pub fn create_at(&mut self, parent: u32, name: &str, is_directory: bool) -> Result<u32, FsError> {
-        self.transaction(|fs| fs.create_entry(parent, name, is_directory))
+        self.transaction(|fs| fs.create_entry(parent, name, is_directory, &[]))
     }
 
-    fn create_entry(&mut self, parent: u32, name: &str, is_directory: bool) -> Result<u32, FsError> {
+    fn create_entry(&mut self, parent: u32, name: &str, is_directory: bool, contents: &[u8]) -> Result<u32, FsError> {
         let parent_inode = *self.inodes.get(parent as usize).ok_or(FsError::FileNotFound)?;
         if !self.may(&parent_inode, Access::Write) || !self.may(&parent_inode, Access::Execute) {
             return Err(FsError::PermissionDenied);
         }
-        if name.is_empty() || name.len() > 56 || name.contains(['/', '\0']) || matches!(name, "." | "..") || self.find_at(parent, name).is_some() {
+        if name.is_empty() || name.len() > 56 || name.contains(['/', '\0']) || matches!(name, "." | "..") || self.lookup(parent, name)?.is_some() {
             return Err(FsError::InvalidPath);
         }
         let inode_number = (1..INODE_COUNT).find(|&i| self.inodes[i].links == 0).ok_or(FsError::DiskFull)? as u32;
@@ -535,6 +576,19 @@ impl<B: BlockDevice> ZenithFs<B> {
             write_root_extent(&mut self.device, &mut inode, &extent)?;
             self.device.write_block(block as usize, &[0; BLOCK_SIZE])?;
         }
+        let mut entry = OnDiskDirEntry { name: [0; 56], inode: inode_number,
+            file_type: if is_directory { 1 } else { 0 }, reserved: [0; 3] };
+        entry.name[..name.len()].copy_from_slice(name.as_bytes());
+        self.inodes[inode_number as usize] = inode;
+        // Grow the directory last. Its old extent-index blocks still belong
+        // to the previous generation until the journal marker is durable.
+        if !contents.is_empty() { self.write_contents(inode_number, contents)?; }
+        self.insert_record(parent, &entry)?;
+        Ok(inode_number)
+    }
+
+    fn insert_record(&mut self, parent: u32, entry: &OnDiskDirEntry) -> Result<(), FsError> {
+        let parent_inode = self.inodes[parent as usize];
         let mut data = self.read_directory(parent)?;
         let slot = match data.chunks_exact(64).position(|entry| {
             let record: OnDiskDirEntry = unsafe { core::ptr::read_unaligned(entry.as_ptr() as *const OnDiskDirEntry) };
@@ -554,15 +608,46 @@ impl<B: BlockDevice> ZenithFs<B> {
             }
         };
 
-        let mut entry = OnDiskDirEntry { name: [0; 56], inode: inode_number,
-            file_type: if is_directory { 1 } else { 0 }, reserved: [0; 3] };
-        entry.name[..name.len()].copy_from_slice(name.as_bytes());
-        let bytes = as_bytes(&entry);
+        let bytes = as_bytes(entry);
         data[slot * 64..slot * 64 + bytes.len()].copy_from_slice(bytes);
-        self.write_directory(parent, &data)?;
+        self.stage_directory_slot(parent, &data, slot)
+    }
 
-        self.inodes[inode_number as usize] = inode;
-        Ok(inode_number)
+    /// Move a named entry into another directory in one journal transaction.
+    /// The inode (and its children, extents and ownership) stays unchanged.
+    pub fn move_into(&mut self, path: &str, destination: &str) -> Result<(), FsError> {
+        let (dir, name) = path.trim_matches('/').rsplit_once('/').unwrap_or(("", path.trim_matches('/')));
+        if name.is_empty() { return Err(FsError::InvalidPath); }
+        let from = self.resolve(dir)?;
+        let id = self.resolve(path)?;
+        let to = self.resolve(destination)?;
+        if from == to { return Ok(()); }
+        for parent in [from, to] {
+            let inode = self.inodes[parent as usize];
+            if inode.file_type != 1 || !self.may(&inode, Access::Write) || !self.may(&inode, Access::Execute) {
+                return Err(FsError::PermissionDenied);
+            }
+        }
+        if self.lookup(to, name)?.is_some() { return Err(FsError::InvalidPath); }
+        if self.inodes[id as usize].file_type == 1 {
+            let mut parent = ROOT_INODE;
+            for part in destination.split('/').filter(|s| !s.is_empty()) {
+                parent = self.lookup(parent, part)?.ok_or(FsError::FileNotFound)?;
+                if parent == id { return Err(FsError::InvalidPath); }
+            }
+        }
+        let mut data = self.read_directory(from)?;
+        for (index, slot) in data.chunks_exact_mut(64).enumerate() {
+            let entry = unsafe { core::ptr::read_unaligned(slot.as_ptr().cast::<OnDiskDirEntry>()) };
+            if entry.inode == id && entry.name() == name.as_bytes() {
+                slot.fill(0);
+                return self.transaction(|fs| {
+                    fs.insert_record(to, &entry)?;
+                    fs.stage_directory_slot(from, &data, index)
+                });
+            }
+        }
+        Err(FsError::FileNotFound)
     }
 
     pub fn create_path(&mut self, path: &str, is_directory: bool) -> Result<u32, FsError> {
@@ -596,12 +681,13 @@ impl<B: BlockDevice> ZenithFs<B> {
             let entry = unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const OnDiskDirEntry) };
             if entry.inode == 0 { continue; }
             if entry.name() == name.as_bytes() { return Err(FsError::InvalidPath); }
-            if entry.name() == old.as_bytes() { slot = Some(i * 64); }
+            if entry.name() == old.as_bytes() { slot = Some(i); }
         }
-        let offset = slot.ok_or(FsError::FileNotFound)?;
+        let slot = slot.ok_or(FsError::FileNotFound)?;
+        let offset = slot * 64;
         data[offset..offset+56].fill(0);
         data[offset..offset+name.len()].copy_from_slice(name.as_bytes());
-        self.transaction(|fs| fs.write_directory(parent, &data))
+        self.transaction(|fs| fs.stage_directory_slot(parent, &data, slot))
     }
 
     // ---- file operations ---------------------------------------------------
@@ -617,11 +703,7 @@ impl<B: BlockDevice> ZenithFs<B> {
         let path = path.trim_matches('/');
         let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
         let parent = self.resolve(dir)?;
-        self.transaction(|fs| {
-            let id = fs.create_entry(parent, name, false)?;
-            fs.write_contents(id, data)?;
-            Ok(id)
-        })
+        self.transaction(|fs| fs.create_entry(parent, name, false, data))
     }
 
     fn write_contents(&mut self, inode_number: u32, data: &[u8]) -> Result<(), FsError> {
@@ -745,16 +827,12 @@ impl<B: BlockDevice> ZenithFs<B> {
             return Err(FsError::PermissionDenied);
         }
         let mut data = self.read_directory(parent)?;
-        for entry in data.chunks_exact_mut(64) {
-            let mut record: OnDiskDirEntry = unsafe { core::ptr::read_unaligned(entry.as_ptr() as *const OnDiskDirEntry) };
-            if record.inode == inode_number {
-                record.inode = 0;
-                let bytes = as_bytes(&record);
-                entry.copy_from_slice(bytes);
-                break;
-            }
-        }
-        self.write_directory(parent, &data)?;
+        let slot = data.chunks_exact(64).position(|bytes| {
+            let entry = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<OnDiskDirEntry>()) };
+            entry.inode == inode_number
+        }).ok_or(FsError::IoError)?;
+        data[slot * 64..(slot + 1) * 64].fill(0);
+        self.stage_directory_slot(parent, &data, slot)?;
         let old_inode = self.inodes[inode_number as usize];
         self.free_extents(&old_inode)?;
         let inode = &mut self.inodes[inode_number as usize];
@@ -1006,6 +1084,123 @@ mod tests {
             if result.is_ok() { return; }
         }
         panic!("Save As never committed");
+    }
+
+    #[test]
+    fn directory_move_is_atomic_across_two_parents() {
+        let mut device = memory(256);
+        ZenithFs::format(&mut device).unwrap();
+        let mut fs = ZenithFs::mount(device).unwrap();
+        fs.create("from", true).unwrap();
+        fs.create("to", true).unwrap();
+        let folder = fs.create_path("from/project", true).unwrap();
+        let note = fs.create_with_data("from/project/note", b"retained").unwrap();
+        assert_eq!(fs.move_into("from", "from/project"), Err(FsError::InvalidPath));
+        // Moving into a full directory also journals its growth.
+        for i in 0..8 { fs.create_path(&alloc::format!("to/n{i}"), false).unwrap(); }
+        for budget in 0..100 {
+            let mut attempt = ZenithFs::mount(fs.device.clone()).unwrap();
+            attempt.device.writes_left = Some(budget);
+            let result = attempt.move_into("from/project", "/to");
+            attempt.device.writes_left = None;
+            let mut recovered = ZenithFs::mount(attempt.device).unwrap();
+            let old = recovered.resolve("from/project").ok();
+            let new = recovered.resolve("to/project").ok();
+            assert!(matches!((old, new), (Some(id), None) | (None, Some(id)) if id == folder));
+            let path = if new.is_some() { "to/project/note" } else { "from/project/note" };
+            assert_eq!(recovered.resolve(path), Ok(note));
+            assert_eq!(recovered.read(note).unwrap(), b"retained");
+            if result.is_ok() {
+                assert_eq!(new, Some(folder));
+                recovered.create_path("from/project", true).unwrap();
+                assert_eq!(recovered.move_into("from/project", "to"), Err(FsError::InvalidPath));
+                return;
+            }
+        }
+        panic!("move did not complete");
+    }
+
+    #[test]
+    fn bad_directory_inode_reports_io_error_and_prevents_mutations() {
+        let mut device = memory(128);
+        ZenithFs::format(&mut device).unwrap();
+        let mut fs = ZenithFs::mount(device).unwrap();
+        fs.create("folder", true).unwrap();
+        let root = fs.inodes[ROOT_INODE as usize];
+        let block = fs.map_block(&root, 0).unwrap().unwrap() as usize;
+        fs.device.blocks[block][56..60].copy_from_slice(&u32::MAX.to_le_bytes());
+        let original = fs.device.blocks.clone();
+        assert_eq!(fs.resolve("folder/child"), Err(FsError::IoError));
+        assert_eq!(fs.create("another", false), Err(FsError::IoError));
+        assert_eq!(fs.device.blocks, original);
+    }
+
+    #[test]
+    fn mount_rejects_ambiguous_or_unreachable_entries() {
+        let mut dev = memory(128);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fs = ZenithFs::mount(dev).unwrap();
+        let folder = fs.create("work", true).unwrap();
+        fs.create_with_data("note", b"keep").unwrap();
+        let root = fs.inodes[ROOT_INODE as usize];
+        let root_block = fs.map_block(&root, 0).unwrap().unwrap() as usize;
+        let directory = fs.inodes[folder as usize];
+        let child_block = fs.map_block(&directory, 0).unwrap().unwrap() as usize;
+
+        let mut orphan = fs.device.clone();
+        orphan.blocks[root_block][64..128].fill(0);
+        assert!(matches!(ZenithFs::mount(orphan), Err(FsError::IoError)));
+
+        let mut duplicate_name = fs.device.clone();
+        duplicate_name.blocks[root_block][64..68].copy_from_slice(b"work");
+        assert!(matches!(ZenithFs::mount(duplicate_name), Err(FsError::IoError)));
+
+        let mut two_parents = fs.device;
+        let root_data = two_parents.blocks[root_block];
+        two_parents.blocks[child_block][..64].copy_from_slice(&root_data[64..128]);
+        assert!(matches!(ZenithFs::mount(two_parents), Err(FsError::IoError)));
+    }
+
+    #[test]
+    fn one_block_replacement_only_journals_the_changed_inode_table_sector_and_superblock() {
+        let mut dev = memory(128);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fs = ZenithFs::mount(dev).unwrap();
+        let id = fs.create_with_data("note", b"old").unwrap();
+        // One new data block, two journal records, the marker, two home
+        // blocks, and the final header clear.
+        fs.device.writes_left = Some(7);
+        fs.write(id, b"new").unwrap();
+        let mut fs = ZenithFs::mount(fs.device).unwrap();
+        assert_eq!(fs.read(id).unwrap(), b"new");
+    }
+
+    #[test]
+    fn interrupted_save_as_preserves_a_fragmented_directory_index() {
+        let mut dev = memory(256);
+        ZenithFs::format(&mut dev).unwrap();
+        let mut fs = ZenithFs::mount(dev).unwrap();
+        for i in 0..48 {
+            fs.create_with_data(&alloc::format!("note{i}"), &[i]).unwrap();
+        }
+        let root = fs.inodes[ROOT_INODE as usize];
+        assert!(!fs.extents(&root).unwrap().1.is_empty());
+        for budget in 0..100 {
+            let mut attempt = ZenithFs::mount(fs.device.clone()).unwrap();
+            attempt.device.writes_left = Some(budget);
+            let result = attempt.create_with_data("next", b"new");
+            attempt.device.writes_left = None;
+            let mut recovered = ZenithFs::mount(attempt.device).unwrap();
+            for i in 0..48 {
+                let id = recovered.resolve(&alloc::format!("note{i}")).unwrap();
+                assert_eq!(recovered.read(id).unwrap(), [i]);
+            }
+            if let Some(id) = recovered.find("next") {
+                assert_eq!(recovered.read(id).unwrap(), b"new");
+            } else { assert!(result.is_err()); }
+            if result.is_ok() { return; }
+        }
+        panic!("save never completed");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ZenithOS v0.3.2 — Nightfall terminal manual
+# ZenithOS v0.4.0 — Aurora terminal manual
 
 Open Terminal from Start, the dock or the desktop context menu. Commands run
 at `zenith>`. Up/Down recalls history; normal line editing is supported.
@@ -12,6 +12,7 @@ at `zenith>`. Up/Down recalls history; normal line editing is supported.
 | `date` | Firmware date/time, or RTC unavailable |
 | `mem`, `meminfo` | Available kernel memory information |
 | `sysinfo` | System overview |
+| `tasks` | Scheduled kernel task IDs and cumulative TSC ticks; current heap occupancy in bytes |
 | `pwd` | Print `/` (the shell has no change-directory command) |
 | `ls [path]` | List a Zenith FS directory, default `/` |
 | `mkdir path` | Create a directory; its parent must exist |
@@ -30,6 +31,8 @@ at `zenith>`. Up/Down recalls history; normal line editing is supported.
 
 Paths are relative to `/` unless prefixed with `/`. The entire remainder of
 the command is the path; no shell quoting, pipelines or expansion is provided.
+Ctrl+Shift+C copies the current input line. Ctrl+V inserts one clipboard line
+only if it fits; press Enter yourself to execute it.
 Filesystem errors are printed rather than simulated. Commands require a
 mounted Zenith FS volume. Time is firmware time without timezone conversion.
 

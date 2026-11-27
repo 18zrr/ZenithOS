@@ -137,6 +137,16 @@ This document records key architectural and implementation decisions made during
 
 ### Decision 17: Regular Decision Review 
 - **Status**: Active
+
+### Decision 18: Validate the v5 directory tree at mount
+- **Status**: Implemented for Aurora.
+- **Decision**: Replay committed transactions first, then check block
+  ownership and walk the directory tree before exposing the writable volume.
+  Every live non-root inode must be reachable by exactly one entry; v5 does
+  not implement hard links. A failed check leaves the volume unmounted.
+- **Rationale**: The 64-inode limit makes the walk bounded. Guessing which
+  name to keep or which blocks to free could discard recoverable user data.
+  This needs neither an on-disk format change nor an automatic repair step.
 - **Rationale**: Ensures decisions remain valid as the project evolves.
 - **Alternatives Considered**: Static decision making (rigid)
 - **Implementation**: Periodic review of all major design decisions

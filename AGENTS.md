@@ -6,7 +6,7 @@ Follow all existing instructions in `DEVELOPMENT_RULES.md`, `INTERFACES.md`,
 ## Permanent release codename policy
 
 Official format: **ZenithOS v<version> — <codename>**.
-Current identity: **ZenithOS v0.3.2 — Nightfall**.
+Current development identity: **ZenithOS v0.4.0 — Aurora**.
 
 | Version series | Codename |
 |---|---|

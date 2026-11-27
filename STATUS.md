@@ -1,12 +1,20 @@
 # Zenith OS - Project Status
 
-Current release identity: **ZenithOS v0.3.2 — Nightfall**.
-Polish implementation and QEMU results are recorded in `RELEASE_NOTES.md`.
+Development build: **ZenithOS v0.4.0 — Aurora**. Published baseline:
+**ZenithOS v0.3.2 — Nightfall**. See the [milestone plan](docs/aurora-development.md)
+and `RELEASE_NOTES.md` for the implemented subset.
 The workspace manifest and `release-codenames.txt` are authoritative.
 Canonical artifacts use lowercase codenames; the short image names below
 remain compatibility paths. Older verification records below are historical.
 
-## Verified working (this revision)
+## Aurora storage verification
+
+The locked workspace build and 47 tests passed. In QEMU, Aurora reopened a
+Nightfall data disk and copied its saved note through Explorer. The desktop
+storage regression also preserved an unrecognized disk byte for byte. See
+[release notes](RELEASE_NOTES.md) for journal and mount checks.
+
+## Earlier desktop verification
 
 - **Workspace**: `cargo build --workspace` is clean and
   `cargo test --workspace` reports **31 tests / 42 suites / 0 failures**.

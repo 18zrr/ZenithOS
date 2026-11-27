@@ -1,6 +1,6 @@
 # Zenith OS Wiki
 
-Current release: **ZenithOS v0.3.2 — Nightfall**. Release identity is derived
+Development build: **ZenithOS v0.4.0 — Aurora**. Release identity is derived
 from the workspace manifest and `release-codenames.txt`. See
 [release identity](Release-Identity.md) for naming and artifact conventions.
 

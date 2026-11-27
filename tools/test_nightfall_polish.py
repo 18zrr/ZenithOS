@@ -1,11 +1,13 @@
 """QEMU regression for the v0.3.2 editor and filesystem shell commands."""
 import json
+import re
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from release_metadata import metadata
 
 
 def run(iso):
@@ -62,6 +64,17 @@ def run(iso):
                                 text(value)
                                 keys("ret")
 
+                            def expect_command(value, expected):
+                                offset = log.stat().st_size
+                                shell(value)
+                                deadline = time.monotonic() + 5
+                                while time.monotonic() < deadline:
+                                    result = log.read_bytes()[offset:].decode(errors="replace")
+                                    if expected in result:
+                                        return
+                                    time.sleep(.05)
+                                raise AssertionError(f"{value}: expected {expected!r} in {result!r}")
+
                             command("qmp_capabilities")
                             if not second:
                                 shell("mkdir polish")
@@ -80,7 +93,22 @@ def run(iso):
                                 keys(*"discard", "esc", "d", "alt-shift-tab")
                                 shell("cat polish/renamed")
                                 wait("replacementdraft")
+                                # Mark both files, copy into Home in another tab,
+                                # then cut the copies into a newly created folder.
+                                keys("f1", *"explorer", "ret", "home", "spc", "down", "spc",
+                                     "ctrl-c", "ctrl-t", "backspace", "ctrl-v")
+                                keys("d", *"moved", "ret", "ctrl-f", *"note", "ret", "home",
+                                     "ctrl-x", "esc", "home", "ret", "ctrl-v")
+                                keys("alt-left", "alt-right", "ctrl-g", "home", "e", "ctrl-a", "ctrl-c", "esc")
+                                keys("ctrl-tab", "f1", *"terminal", "ret")
+                                text("echo clip")
+                                keys("ctrl-v", "ret")
+                                wait("cliporiginal\nzenith>")
+                                expect_command("cat moved/note", "original")
+                                expect_command("cat renamed", "replacementdraft")
                             else:
+                                expect_command("cat moved/note", "original")
+                                expect_command("cat note", "cat: File not found")
                                 shell("cat polish/note")
                                 wait("original")
                                 shell("cat polish/renamed")
@@ -90,17 +118,44 @@ def run(iso):
                                 shell("date")
                                 wait("(firmware clock)")
                                 shell("version")
-                                wait("ZenithOS v0.3.2 - Nightfall (x86_64, Limine)")
+                                version, codename = metadata()
+                                wait(f"ZenithOS v{version} - {codename} (x86_64, Limine)")
+                            # Reopen Settings on the second boot. Starting at
+                            # 1 s, two successive increments must save 2 then 5;
+                            # a loader falling back to defaults would save 2 twice.
+                            keys("f1", *"settings", "ret", "ret")
+                            keys("f1", *"monitor", "ret", "ctrl-alt-left", "ctrl-alt-down", "pgdn")
+                            keys("f1", *"terminal", "ret")
+                            shell("tasks")
+                            wait("Kernel heap bytes:")
+                            # Reading a file allocates a temporary buffer. Once
+                            # it is dropped, the measured live heap must recover.
+                            for _ in range(3):
+                                shell("cat polish/note")
+                            shell("tasks")
+                            wait("task 3: Idle")
                             contents = log.read_text(errors="replace")
+                            end = time.monotonic() + 5
+                            while contents.count("Kernel heap bytes:") < 2 and time.monotonic() < end:
+                                time.sleep(.1)
+                                contents = log.read_text(errors="replace")
+                            heap = re.findall(r"Kernel heap bytes: (\d+)", contents)
+                            assert len(heap) == 2 and heap[0] == heap[1], heap
+                            ticks = re.findall(r"task 3: Idle \| (\d+) TSC ticks", contents)
+                            assert len(ticks) == 2 and int(ticks[1]) > int(ticks[0]), ticks
                             assert "panic" not in contents.lower()
                             command("quit")
                             vm.wait(timeout=10)
                 finally:
                     if vm.poll() is None:
                         vm.terminate()
+            seconds = 5 if second else 2
+            assert bytes([ord("Z"), ord("P"), 2, 0, 0, 0, 0, 0, 0, seconds]) in disk.read_bytes()
         assert b"replacementdraftdiscard" not in disk.read_bytes()
     print("PASS: shell create/read, selection, Save As, rename, properties navigation, "
-          "delete confirmation, unsaved cancel/discard, reboot persistence, date/version")
+          "delete confirmation, unsaved cancel/discard, reboot persistence, date/version, "
+          "Explorer tab/history/search and copy/move, saved Monitor interval, "
+          "task accounting and kernel heap reclamation")
 
 
 if __name__ == "__main__":

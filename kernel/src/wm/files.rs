@@ -7,6 +7,9 @@ use alloc::{
     string::{String, ToString},
 };
 use zenith_fs::FsError;
+mod navigation;
+mod transfer;
+use navigation::Tab;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -20,10 +23,15 @@ enum Mode {
     SaveAs,
     ConfirmClose,
     Properties,
+    Search,
 }
 
 pub(super) struct Files {
-    dir: String,
+    tab: Tab,
+    other_tabs: [Option<Tab>; 4],
+    slot: usize,
+    marked: Vec<String>,
+    transfer: Option<transfer::Transfer>,
     entries: Vec<(String, bool)>,
     selected: usize,
     mode: Mode,
@@ -45,7 +53,11 @@ const NOTE_LIMIT: usize = 4096;
 impl Files {
     pub const fn new() -> Self {
         Self {
-            dir: String::new(),
+            tab: Tab::new(),
+            other_tabs: [const { None }; 4],
+            slot: 0,
+            marked: Vec::new(),
+            transfer: None,
             entries: Vec::new(),
             selected: 0,
             mode: Mode::Browse,
@@ -94,7 +106,7 @@ impl Files {
             return false;
         }
         let name = new_name.unwrap_or(&self.entries[self.selected].0);
-        let path = format!("{}/{}", self.dir, name);
+        let path = format!("{}/{}", self.tab.dir, name);
         let result = volume(|fs| {
             if new_name.is_some() { fs.create_with_data(&path, self.input.as_bytes()).map(|_| ()) }
             else { let id = fs.resolve(&path)?; fs.write(id,self.input.as_bytes()) }
@@ -105,29 +117,37 @@ impl Files {
                 self.original.push_str(&self.input);
                 if let Some(name) = new_name {
                     let name = name.to_string();
+                    self.tab.query.clear();
                     self.refresh();
-                    self.selected = self.entries.iter().position(|(n,_)| n == &name).unwrap_or(0);
+                    let Some(index) = self.entries.iter().position(|(n,_)| n == &name) else {
+                        self.status = "File saved; refresh the folder to reopen it".into();
+                        return true;
+                    };
+                    self.selected = index;
                 }
                 self.mode = Mode::Edit;
                 self.status = "Saved. Ctrl+S: save   Ctrl+Shift+S: Save As   Esc: close".into();
                 true
             }
-            Err(e) => { self.status = format!("Save failed: {e}. Draft retained."); false }
+            Err(e) => {
+                self.status = format!("Save failed: {e}. Draft retained.");
+                crate::notifications::post("Editor", &self.status);
+                false
+            }
         }
     }
 
     pub fn refresh(&mut self) {
+        self.marked.clear();
         let selected = self.entries.get(self.selected).map(|(n,_)| n.clone());
         self.mode = Mode::Browse;
         self.entries.clear();
-        match volume(|fs| fs.list(&self.dir)) {
-            Ok(mut entries) => {
-                entries.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                self.entries = entries;
+        match volume(|fs| fs.list(&self.tab.dir)) {
+            Ok(entries) => {
+                self.set_listing(entries);
                 if let Some(i) = self.entries.iter().position(|(n,_)| Some(n) == selected.as_ref()) {
                     self.selected = i;
                 }
-                self.status = format!("{} entries", self.entries.len());
             }
             Err(FsError::InvalidMagicNumber) => self.status = "No mounted Zenith FS disk".into(),
             Err(e) => self.status = e.to_string(),
@@ -139,12 +159,9 @@ impl Files {
         self.mode = Mode::Browse;
         self.input.clear();
         if index == 0 {
-            let child = self.dir.rsplit('/').next().unwrap_or("").to_string();
-            if let Some(i) = self.dir.rfind('/') {
-                self.dir.truncate(i);
-            }
-            self.selected = 0;
-            self.refresh();
+            let Some((parent, child)) = self.tab.dir.rsplit_once('/') else { return; };
+            let child = child.to_string();
+            self.navigate(parent.to_string());
             if let Some(i) = self.entries.iter().position(|(n,_)| n == &child) { self.selected = i; }
             return;
         }
@@ -155,12 +172,10 @@ impl Files {
         let Some((name, folder)) = self.entries.get(self.selected) else {
             return;
         };
-        let path = format!("{}/{}", self.dir, name);
+        let path = format!("{}/{}", self.tab.dir, name);
         match index {
             1 if *folder => {
-                self.dir = path;
-                self.selected = 0;
-                self.refresh();
+                self.navigate(path);
             }
             1 => {
                 self.status = match volume(|fs| {
@@ -234,11 +249,11 @@ impl Files {
             self.status = "Use a single non-empty name".into();
             return;
         }
-        let dest = format!("{}/{}", self.dir, self.input);
+        let dest = format!("{}/{}", self.tab.dir, self.input);
         let src = self
             .entries
             .get(self.selected)
-            .map(|(n, _)| format!("{}/{}", self.dir, n));
+            .map(|(n, _)| format!("{}/{}", self.tab.dir, n));
         let mut copy_too_large = false;
         let result = volume(|fs| match mode {
             Mode::File | Mode::Folder => fs.create_path(&dest, mode == Mode::Folder).map(|_| ()),
@@ -265,9 +280,16 @@ impl Files {
         }
         if let Err(e) = result {
             self.status = format!("Operation failed: {e}. Change the name or Esc to cancel.");
+            crate::notifications::post("Explorer", &self.status);
             return;
         }
+        if mode != Mode::Delete { self.tab.query.clear(); }
         self.refresh();
+        if matches!(mode, Mode::Rename | Mode::Delete) { self.transfer = None; }
+        crate::notifications::post("Explorer", match mode {
+            Mode::File => "File created", Mode::Folder => "Folder created", Mode::Delete => "Entry deleted",
+            Mode::Rename => "Entry renamed", Mode::Copy => "File copied", _ => "Operation completed",
+        });
         if mode != Mode::Delete {
             if let Some(i) = self.entries.iter().position(|(n, _)| n == &self.input) {
                 self.selected = i;
@@ -277,6 +299,20 @@ impl Files {
 
     pub fn key(&mut self, event: KeyEvent, w: &Window) {
         let key = event.key;
+        if self.mode == Mode::Search {
+            match key {
+                Key::Escape => self.mode = Mode::Browse,
+                Key::Enter => {
+                    self.tab.query.clone_from(&self.input);
+                    self.refresh();
+                }
+                Key::Backspace => { self.input.pop(); }
+                Key::Char(b'a') if event.ctrl => self.input.clear(),
+                Key::Char(b @ 32..=126) if !event.ctrl && self.input.len() < 56 => self.input.push(b as char),
+                _ => {}
+            }
+            return;
+        }
         if self.mode == Mode::ConfirmClose {
             match key {
                 Key::Escape | Key::Char(b'c') => self.mode = Mode::Edit,
@@ -314,6 +350,25 @@ impl Files {
             return;
         }
         if self.mode == Mode::Edit {
+            if event.ctrl && matches!(key, Key::Char(b'c' | b'x')) {
+                let selection = self.selection();
+                if !selection.is_empty() {
+                    crate::clipboard::set(&self.input[selection]);
+                    if key == Key::Char(b'x') { self.erase_selection(); }
+                }
+                return;
+            }
+            if event.ctrl && key == Key::Char(b'v') {
+                let text = crate::clipboard::text();
+                if !text.is_empty() && self.input.len() - self.selection().len() + text.len() <= NOTE_LIMIT {
+                    self.erase_selection();
+                    self.input.insert_str(self.cursor, &text);
+                    self.cursor += text.len();
+                } else if !text.is_empty() {
+                    self.status = "Paste would exceed 4 KiB".into();
+                }
+                return;
+            }
             if event.ctrl && matches!(key, Key::Char(b'a' | b'A')) {
                 self.anchor = Some(0);
                 self.cursor = self.input.len();
@@ -384,13 +439,26 @@ impl Files {
             return;
         }
         match key {
+            Key::Char(b' ') => self.toggle_mark(),
+            Key::Char(b'c' | b'x') if event.ctrl => self.copy_selection(key == Key::Char(b'x')),
+            Key::Char(b'v') if event.ctrl => self.paste_selection(),
+            Key::Left if event.alt => self.travel(false),
+            Key::Right if event.alt => self.travel(true),
+            Key::Char(b'f') if event.ctrl => self.search(),
+            Key::Char(b'g') if event.ctrl => self.tab.grid = !self.tab.grid,
+            Key::Char(b't') if event.ctrl => self.new_tab(),
+            Key::Char(b'w') if event.ctrl => self.close_tab(),
+            Key::Tab if event.ctrl => self.next_tab(event.shift),
+            Key::Escape if !self.tab.query.is_empty() => { self.tab.query.clear(); self.refresh(); }
             Key::Home => self.selected = 0,
             Key::End => self.selected = self.entries.len().saturating_sub(1),
-            Key::PageUp => self.selected = self.selected.saturating_sub(self.list_geometry(w).1.max(1)),
-            Key::PageDown => self.selected = (self.selected + self.list_geometry(w).1.max(1)).min(self.entries.len().saturating_sub(1)),
-            Key::Up => self.selected = self.selected.saturating_sub(1),
-            Key::Down => {
-                self.selected = (self.selected + 1).min(self.entries.len().saturating_sub(1))
+            Key::PageUp => self.selected = self.selected.saturating_sub(self.list_geometry(&self.pane(w)).1.max(1)),
+            Key::PageDown => self.selected = (self.selected + self.list_geometry(&self.pane(w)).1.max(1)).min(self.entries.len().saturating_sub(1)),
+            Key::Up => self.selected = self.selected.saturating_sub(self.columns(&self.pane(w))),
+            Key::Left => self.selected = self.selected.saturating_sub(1),
+            Key::Right | Key::Down => {
+                let step = if key == Key::Right { 1 } else { self.columns(&self.pane(w)) };
+                self.selected = (self.selected + step).min(self.entries.len().saturating_sub(1))
             }
             Key::Enter => self.tool(1),
             Key::Backspace => self.tool(0),
@@ -407,37 +475,59 @@ impl Files {
     }
 
     fn buttons(w: &Window) -> [Rect; TOOLS.len()] {
-        let cols = if w.w >= 800 { TOOLS.len() } else { 3 };
+        let cols = if w.w >= 800 { TOOLS.len() } else if w.w >= 450 { 5 } else { 3 };
         let width = (w.w - 24) / cols;
         core::array::from_fn(|i| {
             Rect::new(
                 w.x + 12 + (i % cols * width) as i32,
-                w.y + (TITLEBAR_H + 44 + i / cols * 28) as i32,
+                w.y + (TITLEBAR_H + 104 + i / cols * 28) as i32,
                 width - 3,
                 26,
             )
         })
     }
     fn list_geometry(&self, w: &Window) -> (i32, usize, usize) {
-        let y = Self::buttons(w)[TOOLS.len() - 1].y + 57;
-        let rows = ((w.y + w.h as i32 - 34 - y).max(0) / 24) as usize;
+        let y = if w.h < 325 { w.y + TITLEBAR_H as i32 + 124 }
+            else { Self::buttons(w)[TOOLS.len() - 1].y + 57 };
+        let rows = ((w.y + w.h as i32 - 30 - y).max(0) / self.cell_height()) as usize;
+        let cols = self.columns(w);
         (
             y,
-            rows,
-            self.selected.saturating_sub(rows.saturating_sub(1)),
+            rows * cols,
+            (self.selected / cols).saturating_sub(rows.saturating_sub(1)) * cols,
         )
     }
+    fn columns(&self, w: &Window) -> usize {
+        if self.tab.grid { ((w.w - 24) / 132).max(1) } else { 1 }
+    }
+    fn cell_height(&self) -> i32 { if self.tab.grid { 44 } else { 24 } }
     pub fn click(&mut self, w: &Window, x: i32, y: i32) {
         if self.mode != Mode::Browse {
             return;
         }
-        if let Some(i) = Self::buttons(w).iter().position(|r| r.contains(x, y)) {
+        let mut target = None;
+        self.sidebar(w, |r, _, path| if r.contains(x,y) { target = Some(path.to_string()); });
+        if let Some(path) = target { self.navigate(path); return; }
+        let pane = self.pane(w);
+        if x < pane.x + 12 || x >= pane.x + pane.w as i32 - 12 { return; }
+        let w = &pane;
+        if self.navigation_click(w, x, y) { return; }
+        if let Some(i) = Self::buttons(w).iter().position(|r| w.h >= 325 && r.contains(x, y)) {
             self.tool(i);
             return;
         }
         let (top, rows, first) = self.list_geometry(w);
-        if y >= top && y < top + rows as i32 * 24 {
-            let i = first + ((y - top) / 24) as usize;
+        if y >= top - 27 && y < top - 2 {
+            self.tab.reverse = !self.tab.reverse;
+            self.refresh();
+            return;
+        }
+        let cols = self.columns(w);
+        let cell_w = (w.w - 24) / cols;
+        if y >= top && y < top + (rows / cols) as i32 * self.cell_height() {
+            let col = (x - w.x - 12) as usize / cell_w;
+            if col >= cols { return; }
+            let i = first + ((y - top) / self.cell_height()) as usize * cols + col;
             if i < self.entries.len() {
                 self.selected = i;
             }
@@ -452,6 +542,13 @@ impl Files {
         }
     }
     pub fn draw(&self, f: &mut [u32], stride: usize, h: usize, w: &Window) {
+        self.sidebar(w, |r, name, _| {
+            rounded_rect(f,stride,h,r.x,r.y,r.w,r.h,5,CARD_BG);
+            draw_text(f,stride,h,r.x+6,r.y+4,r.right()-4,name,FG);
+        });
+        let pane = self.pane(w);
+        if pane.x != w.x { draw_text(f,stride,h,w.x+12,w.y+TITLEBAR_H as i32+12,pane.x,"Locations",MUTED); }
+        let w = &pane;
         let left = w.x + 12;
         let right = w.x + w.w as i32 - 12;
         let path_y = w.y + TITLEBAR_H as i32 + 6;
@@ -523,32 +620,9 @@ impl Files {
             draw_text(f,stride,h,left,w.y+w.h as i32-29,right,&self.status,MUTED);
             return;
         }
-        rounded_rect(f, stride, h, left, path_y, w.w - 24, 32, 8, SEARCH_BG);
-        draw_text(
-            f,
-            stride,
-            h,
-            left + 8,
-            path_y + 6,
-            left + 100,
-            "Zenith FS   /",
-            ACCENTS[1],
-        );
-        draw_text(
-            f,
-            stride,
-            h,
-            left + 104,
-            path_y + 6,
-            right,
-            if self.dir.is_empty() {
-                "Home"
-            } else {
-                self.dir.trim_start_matches('/')
-            },
-            FG,
-        );
+        self.draw_navigation(f, stride, h, w);
         for (i, (r, name)) in Self::buttons(w).iter().zip(TOOLS).enumerate() {
+            if w.h < 325 { break; }
             let (mx,my) = mouse::position();
             let color = if r.contains(mx,my) {
                 if mouse::buttons() & mouse::BUTTON_LEFT != 0 { MENU_TILE_SELECTED } else { MENU_TILE_HOVER }
@@ -561,11 +635,12 @@ impl Files {
             draw_text_centered(f, stride, h, r.x + r.w as i32 / 2, r.y + 3, name, MUTED);
         }
         let (top, rows, first) = self.list_geometry(w);
-        draw_text(f, stride, h, left + 8, top - 24, right, "Name", DIM);
-        draw_text(f, stride, h, right - 76, top - 24, right, "Kind", DIM);
+        draw_text(f, stride, h, left + 8, top - 24, right,
+            if self.tab.reverse { "Name (Z-A)" } else { "Name (A-Z)" }, DIM);
+        if !self.tab.grid { draw_text(f, stride, h, right - 76, top - 24, right, "Kind", DIM); }
         fill(f, stride, h, left, top - 2, w.w - 24, 1, CARD_LINE);
         if rows >= 3 && self.entries.is_empty() && self.mode == Mode::Browse {
-            let mid = top + (rows as i32 * 24) / 2;
+            let mid = top + (rows / self.columns(w)) as i32 * self.cell_height() / 2;
             let mounted = self.status == "0 entries";
             draw_text_centered(
                 f,
@@ -573,7 +648,7 @@ impl Files {
                 h,
                 (left + right) / 2,
                 mid - 23,
-                if mounted {
+                if !self.tab.query.is_empty() { "No matching entries" } else if mounted {
                     "This folder is empty"
                 } else {
                     "Storage unavailable"
@@ -586,7 +661,7 @@ impl Files {
                 h,
                 (left + right) / 2,
                 mid + 3,
-                if mounted {
+                if !self.tab.query.is_empty() { "Esc: clear search" } else if mounted {
                     "Use + File or + Folder to get started."
                 } else {
                     "Attach a Zenith FS disk to browse files."
@@ -595,12 +670,17 @@ impl Files {
             );
         }
         for (j, (name, folder)) in self.entries.iter().skip(first).take(rows).enumerate() {
-            let y = top + j as i32 * 24;
+            let cols = self.columns(w);
+            let width = (w.w - 24) / cols;
+            let left = left + (j % cols * width) as i32;
+            let right = left + width as i32;
+            let y = top + (j / cols) as i32 * self.cell_height();
             if first + j == self.selected {
-                rounded_rect(f, stride, h, left, y, w.w - 24, 24, 4, MENU_TILE_SELECTED);
+                rounded_rect(f, stride, h, left, y, width, self.cell_height() as usize, 4, MENU_TILE_SELECTED);
             } else if j % 2 == 1 {
-                rounded_rect(f, stride, h, left, y, w.w - 24, 24, 4, CARD_BG);
+                rounded_rect(f, stride, h, left, y, width, self.cell_height() as usize, 4, CARD_BG);
             }
+            if self.marked.contains(name) { fill(f,stride,h,left,y+2,3,20,ACCENTS[1]); }
             if *folder {
                 rounded_rect(f, stride, h, left + 8, y + 5, 9, 5, 2, 0xefd099);
                 rounded_rect(f, stride, h, left + 8, y + 8, 19, 12, 2, 0xd6af73);
@@ -608,6 +688,10 @@ impl Files {
                 rounded_rect(f, stride, h, left + 10, y + 4, 13, 16, 2, 0xaec9ec);
                 fill(f, stride, h, left + 13, y + 10, 7, 1, 0x4b6987);
                 fill(f, stride, h, left + 13, y + 14, 5, 1, 0x4b6987);
+            }
+            if self.tab.grid {
+                draw_text(f, stride, h, left + 8, y + 22, right - 4, name, FG);
+                continue;
             }
             draw_text(
                 f,
@@ -627,10 +711,16 @@ impl Files {
             Mode::Folder => "New folder:",
             Mode::Rename => "Rename to:",
             Mode::Copy => "Copy as:",
+            Mode::Search => "Find in folder:",
             Mode::Delete => "Delete selection? Enter: delete   Esc: cancel",
             _ => self.status.as_str(),
         };
         let y = w.y + w.h as i32 - 29;
+        if matches!(self.mode, Mode::File | Mode::Folder | Mode::Rename | Mode::Copy)
+            && (self.status.starts_with("Operation failed:") || self.status.starts_with("Use a single")) {
+            fill(f,stride,h,left,y-28,w.w-24,26,WINDOW_BG);
+            draw_text(f,stride,h,left,y-26,right,&self.status,STATUS_WARN);
+        }
         fill(f, stride, h, left, y - 4, w.w - 24, 1, CARD_LINE);
         draw_text(
             f,

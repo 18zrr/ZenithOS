@@ -7,6 +7,10 @@ use zenith_elf::{Image, PAGE};
 mod files;
 mod threads;
 mod pipes;
+mod zenapp;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+static ZENAPP: AtomicBool = AtomicBool::new(false);
 
 global_asm!(include_str!("arch/x86_64/user.s"), options(att_syntax));
 
@@ -87,7 +91,8 @@ impl Space {
     fn image(&mut self, img: &Image, bias: u64) -> Result<(), &'static str> {
         for seg in img.segments() {
             for addr in seg.range().step_by(PAGE) {
-                let page = self.map(bias + addr, seg.flags & 2 != 0, seg.flags & 1 != 0)?;
+                let address = bias.checked_add(addr).ok_or("load address overflow")?;
+                let page = self.map(address, seg.flags & 2 != 0, seg.flags & 1 != 0)?;
                 seg.load_page(addr, page)?;
             }
         }
@@ -137,8 +142,11 @@ fn random() -> Result<[u8; 16], &'static str> {
 
 // End the mutable borrow of Space before entering user mode. The syscall
 // dispatcher then has exclusive access until native_enter returns.
-fn prepare() -> Result<(u64,u64,u64), &'static str> {
+fn prepare(zenapp: bool) -> Result<(u64,u64,u64), &'static str> {
     let img = Image::parse(limine::module_bytes(0).ok_or("missing program module")?)?;
+    if zenapp && (img.interpreter.is_some() || img.position_independent || img.entry == 0) {
+        return Err("Zenith ABI v1 requires a static ET_EXEC image");
+    }
     let bias = if img.position_independent { BASE } else {0};
     let space = unsafe { &mut *addr_of_mut!(SPACE) };
     space.setup()?;
@@ -152,6 +160,11 @@ fn prepare() -> Result<(u64,u64,u64), &'static str> {
         (LOADER + ld.entry, LOADER)
     } else { (bias + img.entry, 0) };
     for addr in (STACK..END).step_by(PAGE) { space.map(addr,true,false)?; }
+    if zenapp {
+        // A SysV-aligned stack for a freestanding C entry function. There
+        // is no caller: applications terminate through the exit syscall.
+        return Ok((entry, END - 8, limine::physical(space.root.as_ptr() as usize)));
+    }
     let entropy = END - 16;
     space.write(entropy,&random()?)?;
     let (phdr, phent, phnum) = img.program_headers().ok_or("unmapped PHDR")?;
@@ -178,8 +191,8 @@ fn prepare() -> Result<(u64,u64,u64), &'static str> {
     Ok((entry,sp,limine::physical(space.root.as_ptr() as usize)))
 }
 
-pub fn boot() {
-    let (entry,sp,root) = match prepare() {
+pub fn boot(zenapp: bool) {
+    let (entry,sp,root) = match prepare(zenapp) {
         Ok(state) => state,
         Err(e) => { log::serial_puts("[runelf] "); log::serial_puts(e); log::serial_puts("\n"); return; }
     };
@@ -188,6 +201,7 @@ pub fn boot() {
         if features & ((1<<20)|(1<<11)) != ((1<<20)|(1<<11)) { return 256; }
         let fs = rdmsr(0xc0000100);
         let gs = rdmsr(0xc0000101);
+        let saved_msrs = [EFER, 0xc0000081, 0xc0000082, 0xc0000084].map(|id| (id, rdmsr(id)));
         wrmsr(0xc0000100,0);
         wrmsr(0xc0000101,0);
         wrmsr(EFER,rdmsr(EFER) | (1<<11) | 1);
@@ -196,14 +210,17 @@ pub fn boot() {
         wrmsr(0xc0000084, 0x47700);
         DEADLINE = timer::ticks() + 9000;
         threads::init();
+        ZENAPP.store(zenapp, Ordering::Relaxed);
         let cr4:u64;
         asm!("mov {}, cr4",out(reg) cr4);
         // No global TLB aliases, user FSGSBASE or extended AVX state in this runner.
         asm!("mov cr4, {}",in(reg) cr4 & !((1<<7)|(1<<16)|(1<<18)));
         let result = native_enter(entry,sp,root);
+        ZENAPP.store(false, Ordering::Relaxed);
         asm!("mov cr4, {}",in(reg) cr4);
         wrmsr(0xc0000100,fs);
         wrmsr(0xc0000101,gs);
+        for (id, value) in saved_msrs { wrmsr(id, value); }
         result
     });
     log::serial_puts("[runelf] status=");
@@ -232,6 +249,10 @@ pub fn trap(user: &mut interrupt::UserFrame, fx: &mut [u8;512]) -> bool {
     }
     if f.vector != 256 { return false; }
     let s = unsafe { &mut *addr_of_mut!(SPACE) };
+    if ZENAPP.load(Ordering::Relaxed) {
+        f.rax = zenapp::dispatch(s, f) as u64;
+        return true;
+    }
     if matches!(f.rax,56|60|186|202|218|231) {
         threads::call(s,user,fx);
         return true;

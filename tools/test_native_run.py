@@ -1,6 +1,7 @@
 """Boot native x86-64 processes on Zenith, without a host browser or Linux guest."""
 import argparse
 import configparser
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -35,11 +36,11 @@ message: .ascii "hello from a native ELF process\\n"
 """
 
 
-def run(work, modules, expected, mode="", save=None):
-    limine = Path(subprocess.check_output(["limine", "--print-datadir"], text=True).strip())
+def run(work, modules, expected, mode="", save=None, entry="runelf"):
+    limine = Path(os.environ.get("LIMINE_DIR") or subprocess.check_output(["limine", "--print-datadir"], text=True).strip())
     config = work / "limine.conf"
     config.write_text("timeout: 0\n/Native execution test\n    protocol: limine\n"
-                      f"    kernel_path: boot():/kernel.bin\n    cmdline: zenith runelf {mode}\n"
+                      f"    kernel_path: boot():/kernel.bin\n    cmdline: zenith {entry} {mode}\n"
                       + "".join(f"    module_path: boot():/{name}\n" for name, _ in modules))
     iso = work / "native.iso"
     build(iso, [("limine.conf", str(config)), ("kernel.bin", str(ROOT / "kernel/kernel-limine.bin")),

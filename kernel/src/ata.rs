@@ -1,12 +1,19 @@
 //! ATA PIO driver for the primary IDE bus (I/O ports 0x1F0-0x1F7).
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::diagnostics;
 use crate::io::{inb, outb};
 
 /// True when the primary master responded to a sector read during probe.
 static PRESENT: AtomicBool = AtomicBool::new(false);
+static SECTORS_READ: AtomicU64 = AtomicU64::new(0);
+static SECTORS_WRITTEN: AtomicU64 = AtomicU64::new(0);
+
+/// Successful PIO sector transfers since boot, including filesystem metadata.
+pub fn sector_counts() -> (u64, u64) {
+    (SECTORS_READ.load(Ordering::Relaxed), SECTORS_WRITTEN.load(Ordering::Relaxed))
+}
 
 /// Whether a readable ATA disk was detected at boot.
 pub fn present() -> bool {
@@ -74,6 +81,7 @@ pub fn read_sector(lba: u32, buffer: &mut [u8; 512]) -> Result<(), &'static str>
             buffer[word * 2 + 1] = (value >> 8) as u8;
         }
     }
+    SECTORS_READ.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
@@ -109,6 +117,7 @@ pub fn write_sector(lba: u32, data: &[u8; 512]) -> Result<(), &'static str> {
             return Err("ATA write failed");
         }
     }
+    SECTORS_WRITTEN.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 

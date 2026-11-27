@@ -109,7 +109,16 @@ isr_common:
     addq $512, %rsp
     jmp .Lrestore_interrupt
 .Lkernel_interrupt:
+    # An IRQ can interrupt any instruction, not just a call boundary.
+    # Preserve the interrupted SIMD state and align the Rust call stack.
+    # RBX is already saved in the frame and the SysV callee preserves it.
+    movq %rsp, %rbx
+    andq $-16, %rsp
+    subq $512, %rsp
+    fxsave64 (%rsp)
     call rust_interrupt_handler
+    fxrstor64 (%rsp)
+    movq %rbx, %rsp
 
 .Lrestore_interrupt:
     popq %rax

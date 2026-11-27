@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 extern crate alloc;
+pub mod chart;
 
 use alloc::string::{String, ToString};
 use alloc::vec;

@@ -9,7 +9,7 @@ assembly entry points.
 |---|---|
 | `lib.rs` | Entry point, subsystem initialisation, panic handler, libc shims |
 | `diagnostics.rs` | Serial/VGA/framebuffer logging |
-| `allocator.rs` | Global bump allocator for `alloc` |
+| `allocator.rs` | Reclaiming, interrupt-safe kernel heap for `alloc` |
 | `page_table.rs` | 4-level page tables, higher half, demand paging |
 | `interrupt.rs` | IDT, PIC, page-fault and exception reporting |
 | `timer.rs` | PIT at 100 Hz |

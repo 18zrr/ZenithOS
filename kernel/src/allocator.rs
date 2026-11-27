@@ -1,54 +1,50 @@
-//! Simple bump allocator providing `alloc` support for kernel components.
-
+//! Reclaiming allocator for the fixed kernel heap, including compositor surfaces.
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::ptr::{self, NonNull};
+use linked_list_allocator::Heap;
 
-// Wallpaper, composition and previous-frame buffers need ~95 MiB at 4K.
-// Include headroom for filesystem and other kernel allocations.
+use crate::{interrupt::without_interrupts, sync::SpinLock};
+
 pub const HEAP_SIZE: usize = 128 * 1024 * 1024;
 
-static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
-static OFFSET: AtomicUsize = AtomicUsize::new(0);
+#[repr(align(4096))]
+struct Arena([u8; HEAP_SIZE]);
 
-struct BumpAllocator;
+static mut ARENA: Arena = Arena([0; HEAP_SIZE]);
+static HEAP: SpinLock<Heap> = SpinLock::new(Heap::empty());
 
-unsafe impl GlobalAlloc for BumpAllocator {
+struct KernelAllocator;
+
+unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let mut current = OFFSET.load(Ordering::Relaxed);
-        let base = core::ptr::addr_of_mut!(HEAP) as *mut u8 as usize;
-        loop {
-            // Align the address, not just the offset: HEAP has byte alignment.
-            let Some(address) = base.checked_add(current)
-                .and_then(|p| p.checked_add(layout.align()-1)) else { return core::ptr::null_mut(); };
-            let aligned = (address & !(layout.align()-1)) - base;
-            let end = match aligned.checked_add(layout.size()) {
-                Some(end) => end,
-                None => return core::ptr::null_mut(),
-            };
-            if end > HEAP_SIZE {
-                return core::ptr::null_mut();
-            }
-            match OFFSET.compare_exchange_weak(
-                current,
-                end,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return (core::ptr::addr_of_mut!(HEAP) as *mut u8).add(aligned),
-                Err(value) => current = value,
-            }
+        if layout.size() > HEAP_SIZE || layout.align() > HEAP_SIZE {
+            return ptr::null_mut();
         }
+        without_interrupts(|| {
+            let mut heap = HEAP.lock();
+            if heap.size() == 0 {
+                // One permanent, page-aligned backing region. Only this
+                // lock's owner initializes or manipulates its free list.
+                heap.init(ptr::addr_of_mut!(ARENA.0).cast(), HEAP_SIZE);
+            }
+            heap.allocate_first_fit(layout)
+                .map_or(ptr::null_mut(), NonNull::as_ptr)
+        })
     }
 
-    unsafe fn dealloc(&self, _pointer: *mut u8, _layout: Layout) {
-        // Bump allocation does not reclaim individual blocks.
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // GlobalAlloc callers supply the live pointer and its original layout.
+        without_interrupts(|| {
+            HEAP.lock()
+                .deallocate(NonNull::new_unchecked(pointer), layout)
+        });
     }
 }
 
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator;
+static ALLOCATOR: KernelAllocator = KernelAllocator;
 
-/// Number of bytes handed out so far.
+/// Bytes currently occupied, including the allocator's alignment overhead.
 pub fn used() -> usize {
-    OFFSET.load(Ordering::Relaxed)
+    without_interrupts(|| HEAP.lock().used())
 }

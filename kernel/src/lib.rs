@@ -12,6 +12,8 @@ pub mod acpi;
 pub mod allocator;
 pub mod ata;
 pub mod browser_bridge;
+mod clipboard;
+mod notifications;
 pub mod diagnostics;
 pub mod display;
 pub mod e1000;
@@ -46,6 +48,22 @@ pub mod wm;
 pub mod mouse;
 
 use core::panic::PanicInfo;
+
+// Image builders can use the host static library on systems without the
+// bare-metal target. Its precompiled liballoc includes cleanup landing pads
+// even under panic=abort. There is no unwinder in this kernel: if one of
+// those paths is ever entered, fail immediately rather than resume execution.
+#[cfg(target_os = "linux")]
+#[export_name = "_Unwind_Resume"]
+extern "C" fn abort_unwind(_: *mut core::ffi::c_void) -> ! {
+    unsafe { core::arch::asm!("ud2", options(noreturn, nostack)) }
+}
+
+#[cfg(target_os = "linux")]
+#[export_name = "rust_eh_personality"]
+extern "C" fn abort_personality() -> ! {
+    unsafe { core::arch::asm!("ud2", options(noreturn, nostack)) }
+}
 
 /// Exercise demand paging after the IDT is live. Kept out-of-line so the
 /// compiler cannot hoist the faulting access before interrupt setup.
@@ -108,7 +126,8 @@ pub extern "C" fn kernel_main() -> ! {
         framebuffer::splash_step("Setting up interrupts...", 32);
     }
     #[cfg(feature = "native-run")]
-    let native_run = limine::is_active() && limine::cmdline().split_ascii_whitespace().any(|s| s == "runelf");
+    let native_run = limine::is_active() && limine::cmdline().split_ascii_whitespace()
+        .any(|s| matches!(s, "runelf" | "zenapp"));
     #[cfg(feature = "native-run")]
     if native_run {
         native::init_segments();
@@ -141,7 +160,7 @@ pub extern "C" fn kernel_main() -> ! {
     syscalls::init();
     #[cfg(feature = "native-run")]
     if native_run {
-        native::boot();
+        native::boot(limine::cmdline().split_ascii_whitespace().any(|s| s == "zenapp"));
     }
 
     if mode == limine::BootMode::Recovery {

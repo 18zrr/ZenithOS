@@ -1,4 +1,4 @@
-# ZenithOS v0.3.2 — Nightfall
+# ZenithOS v0.4.0 — Aurora
 
 Current notes are maintained in [RELEASE_NOTES.md](../../RELEASE_NOTES.md).
 See [release identity](Release-Identity.md) for the permanent codename policy.

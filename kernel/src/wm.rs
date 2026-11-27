@@ -13,6 +13,11 @@ mod files;
 mod prefs;
 mod nightfall;
 mod context;
+mod monitor;
+pub use monitor::key as monitor_key;
+mod settings;
+mod control;
+use settings::Page;
 pub use context::key as context_key;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -32,8 +37,7 @@ use crate::{diagnostics, e1000, limine, mouse, rtc, start_menu, timer};
 const MAX_WINDOWS: usize = 8;
 const TITLEBAR_H: usize = 40;
 /// Preallocated compositor surface, large enough for 4K. All three full-screen
-/// buffers are allocated once so a mode change never needs to grow the bump
-/// heap or leak the previous resolution's surfaces.
+/// buffers are allocated once so mode changes can reuse the same storage.
 const MAX_SURFACE_PIXELS: usize = 3840 * 2160;
 const DISPLAY_CARD_H: usize = 214;
 const DISPLAY_PRESETS: [(usize, usize, &str); 4] = [
@@ -96,17 +100,19 @@ pub enum WindowKind {
     Monitor,
     Settings,
     About,
+    Control,
 }
 
 impl WindowKind {
     fn title(self) -> &'static str {
         match self {
-            WindowKind::Files => "File Manager",
+            WindowKind::Files => "Zenith Explorer",
             WindowKind::Browser => "Browser - Chromium companion",
             WindowKind::Terminal => "Terminal",
-            WindowKind::Monitor => "System Monitor",
-            WindowKind::Settings => "Settings",
+            WindowKind::Monitor => "Zenith Monitor",
+            WindowKind::Settings => "Zenith Settings",
             WindowKind::About => "About Zenith OS",
+            WindowKind::Control => "Zenith Control Center",
         }
     }
 
@@ -118,6 +124,7 @@ impl WindowKind {
             WindowKind::About => 3,
             WindowKind::Browser => 5,
             WindowKind::Files => 6,
+            WindowKind::Control => 2,
         }
     }
 }
@@ -146,8 +153,9 @@ struct Window {
 impl Window {
     fn max_scroll(self) -> usize {
         let content: usize = match self.kind {
-            WindowKind::Settings => 14 + 152 + DISPLAY_CARD_H + 10 + 116 + 12 + 82,
-            WindowKind::Monitor => 14 + 126 + 146 + 116 + 12,
+            WindowKind::Settings => if self.w >= 560 { 300 } else { 420 },
+            WindowKind::Control => 610,
+            WindowKind::Monitor => 14 + 126 + 146 + 126 + 222 + 132 + 12,
             WindowKind::About => 12 + 78 + 82 + 7*24 + 20 + 12,
             _ => 0,
         };
@@ -174,6 +182,8 @@ struct Resize {
 }
 
 struct Wm {
+    monitor: monitor::Monitor,
+    settings_page: Page,
     context: Option<(i32, i32, usize)>,
     clock: Option<rtc::DateTime>,
     files: files::Files,
@@ -201,6 +211,8 @@ struct Wm {
 impl Wm {
     const fn new() -> Self {
         Wm {
+            monitor: monitor::Monitor::new(),
+            settings_page: Page::System,
             context: None,
             clock: None,
             files: files::Files::new(),
@@ -228,6 +240,16 @@ impl Wm {
 }
 
 static WM: crate::sync::SpinLock<Wm> = crate::sync::SpinLock::new(Wm::new());
+
+/// Open quick settings and notification history.
+pub fn open_control() {
+    let mut wm = WM.lock();
+    if wm.initialized && !LOGGED_OUT.load(Ordering::Acquire) {
+        start_menu::close();
+        wm.context = None;
+        wm.open_window(WindowKind::Control);
+    }
+}
 
 fn welcome_button(width: usize, height: usize) -> Rect {
     Rect::new(width as i32/2-110, height as i32/2+20, 220, 44)
@@ -879,6 +901,15 @@ pub fn tick() {
     }
 
     let now = timer::ticks();
+    {
+        let mut wm = WM.lock();
+        let visible = wm.find(WindowKind::Monitor)
+            .and_then(|i| wm.windows[i]).is_some_and(|w| !w.minimized);
+        let seconds = wm.prefs.sample_seconds;
+        if wm.monitor.update(now, visible, seconds) {
+            invalidate();
+        }
+    }
     if now >= NEXT_BROWSER_CHECK.load(Ordering::Relaxed) {
         NEXT_BROWSER_CHECK.store(now + 4, Ordering::Relaxed);
         if browser::changed() {
@@ -1259,8 +1290,13 @@ fn render() {
 
 impl Wm {
     fn save_preferences(&mut self) {
-        self.set_display_status(if self.prefs.save().is_ok() { "Preferences saved to disk" }
-            else { "Session only: preferences could not be saved" });
+        if self.prefs.save().is_ok() {
+            self.set_display_status("Preferences saved to disk");
+        } else {
+            let message = "Session only: preferences could not be saved";
+            self.set_display_status(message);
+            crate::notifications::post("Settings", message);
+        }
     }
 
     fn session_action(&mut self, index: usize) -> Action {
@@ -1276,6 +1312,8 @@ impl Wm {
                 self.windows = [None; MAX_WINDOWS];
                 self.order_len = 0;
                 self.files = files::Files::new();
+                crate::clipboard::set("");
+                crate::notifications::clear();
                 self.display_input_active = false;
                 self.browser_buttons = 0;
                 LOGGED_OUT.store(true, Ordering::Release);
@@ -1399,6 +1437,10 @@ impl Wm {
             WindowKind::Files | WindowKind::Settings => (
                 600usize.min(self.width.saturating_sub(100)).max(380),
                 580usize.min(available_h.saturating_sub(20)).max(320),
+            ),
+            WindowKind::Control => (
+                440usize.min(self.width.saturating_sub(24)),
+                462usize.min(available_h.saturating_sub(20)),
             ),
             WindowKind::About => (
                 480usize.min(self.width.saturating_sub(100)).max(340),
@@ -1529,6 +1571,13 @@ impl Wm {
             }
         }
 
+        if let Some(i) = self.window_at(x, y) {
+            // A control can belong to a partially covered window. Give it
+            // keyboard focus too, as long as the click is in the work area.
+            if y < self.height.saturating_sub(TASKBAR_H) as i32 {
+                self.focus_index(i);
+            }
+        }
         match hit {
             Hit::StartButton => {
                 start_menu::open();
@@ -1624,8 +1673,17 @@ impl Wm {
                 self.focus_index(index);
                 if let Some(w) = self.windows[index] {
                     if w.kind == WindowKind::Files { self.files.click(&w,x,y); }
+                    if w.kind == WindowKind::Control { return self.control_click(&w, x, y + w.offset()); }
                 }
                 invalidate();
+            }
+            Hit::SettingsPage(page) => {
+                self.settings_page = page;
+                self.display_input_active = false;
+                invalidate();
+            }
+            Hit::SampleInterval => {
+                self.cycle_interval();
             }
             Hit::Swatch(swatch) => {
                 self.accent = ACCENTS[swatch.min(ACCENTS.len() - 1)];
@@ -1678,6 +1736,7 @@ impl Wm {
                 invalidate();
                 return self.launch(app);
             }
+            Hit::Control => self.open_window(WindowKind::Control),
             Hit::Session(_) | Hit::MenuInside | Hit::Taskbar | Hit::Desktop => {}
         }
         Action::None
@@ -1739,6 +1798,7 @@ impl Wm {
             }
         }
         if taskbar.panel.contains(x, y) {
+            if x > taskbar.panel.right() - 122 { return Hit::Control; }
             return Hit::Taskbar;
         }
 
@@ -1771,12 +1831,24 @@ impl Wm {
             }
             if window.kind == WindowKind::Settings {
                 let y = y + window.offset();
-                if wallpaper_button(&window).contains(x,y) { return Hit::Wallpaper; }
-                if let Some(swatch) = settings_swatch_at(&window, x, y) {
-                    return Hit::Swatch(swatch);
+                if let Some(page) = settings::page_at(&window, x, y) {
+                    return Hit::SettingsPage(page);
                 }
-                if let Some(control) = display_control_at(&window, x, y) {
-                    return control;
+                let content = settings::content(&window);
+                match self.settings_page {
+                    Page::Appearance => {
+                        if wallpaper_button(&content).contains(x,y) { return Hit::Wallpaper; }
+                        if let Some(swatch) = settings_swatch_at(&content, x, y) {
+                            return Hit::Swatch(swatch);
+                        }
+                    }
+                    Page::Display => {
+                        if display::available() {
+                            if let Some(control) = display_control_at(&content, x, y) { return control; }
+                        }
+                    }
+                    Page::System if settings::interval_button(&content).contains(x,y) => return Hit::SampleInterval,
+                    _ => {}
                 }
             }
             return Hit::Body(index);
@@ -1972,12 +2044,13 @@ impl Wm {
                 }
             }
             WindowKind::Terminal => self.draw_terminal(frame, window, active),
-            WindowKind::Monitor | WindowKind::Settings | WindowKind::About => {
+            WindowKind::Monitor | WindowKind::Settings | WindowKind::About | WindowKind::Control => {
                 let top = (y + TITLEBAR_H as i32).clamp(0,height as i32);
                 let bottom = (y + h as i32 - 2).clamp(top,height as i32);
                 let body = &mut frame[top as usize*stride..bottom as usize*stride];
                 let local = Window { y: y-top-window.offset(), ..*window };
                 match window.kind {
+                    WindowKind::Control => self.draw_control(body, &local, mouse_x, mouse_y - top),
                     WindowKind::Monitor => self.draw_monitor(body,&local),
                     WindowKind::Settings => self.draw_settings(body,&local,mouse_x,mouse_y-top),
                     _ => self.draw_about(body,&local),
@@ -2156,7 +2229,9 @@ impl Wm {
         let stride = self.width;
         let height = frame.len() / stride;
         let x = window.x + 16;
-        let y = window.y + TITLEBAR_H as i32 + 14;
+        let top = window.y + TITLEBAR_H as i32 + 14;
+        self.draw_accounting(frame, window, top);
+        let y = top + 354;
         let card_w = window.w.saturating_sub(32);
         let max_x = x + card_w as i32 - 14;
         let label_x = x + 14;
@@ -2192,7 +2267,7 @@ impl Wm {
         let mut value = TextBuffer::new();
         value.push_dec(heap_kib);
         value.push_str(" KiB");
-        self.monitor_row(frame, label_x, memory_y + 66, max_x, "Compositor heap", value.as_str());
+        self.monitor_row(frame, label_x, memory_y + 66, max_x, "Kernel heap", value.as_str());
 
         let bar_w = card_w.saturating_sub(28);
         let bar_y = memory_y + 94;
@@ -2258,7 +2333,7 @@ impl Wm {
         draw_text(frame, self.width, height, split, y, max_x, value, FG);
     }
 
-    fn draw_settings(&self, frame: &mut [u32], window: &Window, mouse_x: i32, mouse_y: i32) {
+    fn draw_appearance(&self, frame: &mut [u32], window: &Window, mouse_x: i32, mouse_y: i32) {
         let stride = self.width;
         let height = frame.len() / stride;
         let x = window.x + 16;
@@ -2337,6 +2412,15 @@ impl Wm {
             }
         }
 
+    }
+
+    fn draw_display(&self, frame: &mut [u32], window: &Window, mouse_x: i32, mouse_y: i32) {
+        let stride = self.width;
+        let height = frame.len() / stride;
+        let x = window.x + 16;
+        let card_w = window.w.saturating_sub(32);
+        let max_x = x + card_w as i32 - 14;
+        let label_x = x + 14;
         // Display card: live mode selection for adapters with a guest-side
         // Bochs VBE interface, plus an honest notice for everything else.
         let controls = display_controls(window);
@@ -2357,6 +2441,11 @@ impl Wm {
             "Current",
             resolution.as_str(),
         );
+        if !display::available() {
+            draw_text(frame, stride, height, label_x, display_y + 76, max_x,
+                "Mode switching unavailable on this adapter", MUTED);
+            return;
+        }
 
         draw_text(
             frame,
@@ -2483,11 +2572,14 @@ impl Wm {
             );
         }
 
-        // Input card.
-        let input_y = display_y + DISPLAY_CARD_H as i32 + 10;
-        self.card(frame, x, input_y + 126, card_w, 72, "System");
-        draw_text(frame, stride, height, label_x, input_y + 166, max_x,
-            env!("ZENITH_RELEASE_ASCII"), FG);
+    }
+
+    fn draw_input(&self, frame: &mut [u32], window: &Window) {
+        let x = window.x + 16;
+        let input_y = window.y + TITLEBAR_H as i32 + 14;
+        let card_w = window.w.saturating_sub(32);
+        let label_x = x + 14;
+        let max_x = x + card_w as i32 - 14;
         self.card(frame, x, input_y, card_w, 116, "Input");
         self.monitor_row(
             frame,
@@ -3012,6 +3104,9 @@ impl Wm {
 // ---------------------------------------------------------------------------
 
 enum Hit {
+    Control,
+    SettingsPage(Page),
+    SampleInterval,
     Wallpaper,
     Session(usize),
     StartButton,
@@ -3135,6 +3230,46 @@ fn wallpaper_button(window: &Window) -> Rect {
     Rect::new(window.x+208,window.y+TITLEBAR_H as i32+110,90,22)
 }
 
+/// Fit the active window to either half of the work area, or restore its
+/// original bounds with Down. Share the maximize button's restore state.
+pub fn snap_key(key: Key) -> bool {
+    if !matches!(key, Key::Left | Key::Right | Key::Down) { return false; }
+    let mut wm = WM.lock();
+    let Some(i) = wm.top_visible() else { return false; };
+    let mut w = wm.windows[i].unwrap();
+    if key == Key::Down {
+        if !w.maximized { return false; }
+        (w.x, w.y, w.w, w.h) = w.restore;
+        w.maximized = false;
+    } else {
+        if !w.maximized { w.restore = (w.x, w.y, w.w, w.h); }
+        let half = wm.width / 2;
+        w.x = if key == Key::Left { 0 } else { half as i32 };
+        w.w = if key == Key::Left { half } else { wm.width - half };
+        w.y = 0;
+        w.h = wm.height.saturating_sub(TASKBAR_H);
+        w.maximized = true;
+    }
+    wm.windows[i] = Some(w);
+    wm.dragging = None;
+    wm.resizing = None;
+    invalidate();
+    true
+}
+
+/// Navigate Settings pages; on System, Enter cycles Monitor's saved interval.
+pub fn settings_navigation(event: KeyEvent) -> bool {
+    let mut wm = WM.lock();
+    if !wm.settings_focused() || wm.display_input_active { return false; }
+    match event.key {
+        Key::Tab => wm.settings_page = wm.settings_page.adjacent(event.shift),
+        Key::Enter if wm.settings_page == Page::System => wm.cycle_interval(),
+        _ => return false,
+    }
+    invalidate();
+    true
+}
+
 pub fn file_key(event: KeyEvent) -> bool {
     let mut wm=WM.lock();
     let Some(window) = wm.top_visible().and_then(|i| wm.windows[i]) else { return false; };
@@ -3177,7 +3312,7 @@ fn display_controls(window: &Window) -> DisplayControls {
     let card_w = window.w.saturating_sub(32);
     let label_x = x + 14;
     let max_x = x + card_w as i32 - 14;
-    let display_y = y + 152;
+    let display_y = y;
 
     let gap = 6usize;
     let available = (max_x - label_x).max(0) as usize;

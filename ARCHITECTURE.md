@@ -59,6 +59,27 @@ zenith-os/
 
 ## Kernel Components
 
+### Aurora runtime accounting and native desktop
+
+The cooperative scheduler attributes timestamp-counter deltas to the outgoing
+task on the boot CPU; a snapshot includes the current unfinished slice. Zenith
+Monitor compares consecutive snapshots at a configured interval. Interrupt
+and switch overhead are attributed to the interrupted/current task. These
+are residency estimates, not instruction counts or per-core hardware counters.
+The globally locked free-list allocator reports occupied bytes, including
+padding. Disk statistics are read from mounted metadata without a disk scan.
+
+Settings and Monitor are kernel-hosted clients of the compositor. Shared
+chart rendering is in `zenith_ui::chart`; see the
+[Aurora plan](docs/aurora-development.md) for desktop ABI dependencies.
+
+In opt-in `zenapp` mode, a static ELF starts at CPL3 before the compositor is
+initialized, using the runner's dedicated page tables and kernel trap stack.
+Syscalls copy bounded buffers via the runner's mapping checks. Notification
+history is a fixed-size kernel service shared with the later Control Center;
+it does not require a framebuffer during posting. See the
+[application ABI](docs/native-app-abi.md) for the supported interface.
+
 ### Memory Management 
 The kernel implements basic memory management including:
 - Physical and virtual memory mapping

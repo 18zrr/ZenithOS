@@ -1,6 +1,6 @@
 # Status
 
-Current release identity: **ZenithOS v0.3.2 — Nightfall**.
+Current development identity: **ZenithOS v0.4.0 — Aurora**.
 See [release identity](Release-Identity.md) and the root `STATUS.md` for
 current metadata. Verification records below describe earlier development.
 

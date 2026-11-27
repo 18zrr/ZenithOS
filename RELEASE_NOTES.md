@@ -1,3 +1,65 @@
+# ZenithOS v0.4.0 — Aurora
+
+**Development build.** The first Aurora increment replaces the bump heap with
+a coalescing allocator, adds per-task CPU residency accounting, and uses those
+counters in Zenith Monitor. The CPU and kernel heap graphs retain 60 samples;
+sampling pauses when the window is closed or minimized. Volume capacity and
+free space come from the mounted v5 superblock.
+
+Zenith Settings adds responsive navigation and a persistent 1/2/5-second
+sampling interval. Existing v1 preferences are read unchanged; the first save
+writes v2 transactionally. The filesystem format remains v5. The terminal
+`tasks` command reports kernel task IDs, cumulative TSC time and live heap use.
+Ctrl+Alt+Left/Right snaps windows; Ctrl+Alt+Down restores the original bounds.
+
+Explorer adds four directory tabs, bounded back/forward history, breadcrumbs,
+search, sorting, grid/list views, marked-item transfers and a Locations sidebar.
+Cross-directory moves journal both parents and preserve the inode; collisions
+leave the destination untouched. Directory lookup reports invalid records
+as I/O errors. A malformed boot-counter file no longer blocks the volume.
+
+After journal replay, mount walks the v5 directory tree before allowing
+desktop writes. Duplicate names, multiply referenced files and unreachable
+live inodes cause a mount error rather than an automatic repair. Saves now
+journal only the affected inode-table and directory sectors alongside the
+superblock. Save As finishes writing file data before replacing a fragmented
+directory's index, so an interrupted save leaves the previous index readable.
+
+Control Center (F3 or the clock) provides network status, Display/Settings,
+power actions and eight session notifications. Explorer and the editor report
+operation results. The editor and terminal share an in-memory text clipboard.
+
+The optional [Zenith application ABI](docs/native-app-abi.md) runs a static
+ELF boot module in user mode with bounded console output, system information,
+notifications and exit. User faults end that app, then boot continues. Host
+image builds disable the x86_64 red zone; kernel interrupt entry preserves
+SIMD state and aligns the Rust handler stack.
+
+These are kernel-hosted tools. Whole-machine RAM utilization, per-process
+memory, GPU utilization and independently killable desktop processes are not
+available. See the [milestone plan](docs/aurora-development.md).
+
+### Development build validation
+
+- `cargo build --workspace --locked` succeeded; all **47** workspace tests
+  passed, including interrupted cross-directory moves and Save As during
+  fragmented directory growth. Replacing a one-block file took seven sector
+  writes on the test block device, including journal commit and clear.
+- Built the BIOS ISO and UEFI disk image. Both reached the compositor and
+  shell in QEMU. OVMF screenshots showed live Monitor samples, filtering,
+  Control Center notifications, and snapped/restored Explorer windows.
+- Desktop regressions passed: editing/Save As, copy/move across folders,
+  selection, settings persistence, task accounting, kernel heap reclamation,
+  reboot persistence and unknown-disk preservation.
+- In QEMU, a v5 test disk containing duplicate directory names failed to
+  mount. The desktop and shell started, and the disk's SHA-256 was unchanged.
+- A data disk created under v0.3.2 was reopened under Aurora; the saved note
+  remained readable and copyable. Aurora also booted at the resolution saved
+  by v0.3.2 using its original v1 settings record.
+- In separate opt-in QEMU boots, the Zenith ABI example exited successfully,
+  an explicitly aborted app returned control to the OS, and the existing
+  `runelf` static hello example still ran. No physical hardware tests.
+
 # ZenithOS v0.3.2 — Nightfall
 
 Release identity is now centralized in the workspace version and codename

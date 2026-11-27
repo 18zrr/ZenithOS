@@ -7,12 +7,12 @@ use crate::sync::SpinLock;
 
 pub const APPS: [(&str, u32); 7] = [
     ("Terminal", 0x0092_C3FF),
-    ("Monitor", 0x0085_DDD0),
-    ("Settings", 0x00BE_AAFF),
+    ("Zenith Monitor", 0x0085_DDD0),
+    ("Zenith Settings", 0x00BE_AAFF),
     ("About", 0x00F5_AAD5),
     ("Installer", 0x00FF_BA8C),
     ("Browser", 0x008B_D7ED),
-    ("File Manager", 0x00ED_CC8B),
+    ("Explorer - File Manager", 0x00ED_CC8B),
 ];
 
 pub const APP_COUNT: usize = APPS.len();

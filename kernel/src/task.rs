@@ -6,6 +6,8 @@ use crate::sync::SpinLock;
 use crate::timer;
 
 const MAX_TASKS: usize = 3;
+pub(crate) const TASK_NAMES: [&str; MAX_TASKS] = ["Shell & desktop", "Network heartbeat", "Idle"];
+pub(crate) const IDLE_TASK: usize = 2;
 // Filesystem mount alone uses over 17 KiB in the release build, on top of
 // the shell history, installer and interrupt frames. Keep room for that
 // nested call chain; 16 KiB corrupted neighbouring scheduler state.
@@ -30,6 +32,27 @@ struct TaskManager {
     tasks: [Task; MAX_TASKS],
     current: usize,
     started: bool,
+    runtime: [u64; MAX_TASKS],
+    switched_at: u64,
+}
+
+// All three tasks execute on the boot CPU. Compare deltas on that CPU;
+// TSC units are not instruction counts, wall-clock seconds or CPU frequency.
+fn timestamp() -> u64 {
+    unsafe {
+        core::arch::x86_64::_mm_lfence();
+        core::arch::x86_64::_rdtsc()
+    }
+}
+
+/// Cumulative scheduler residency and live slots, including the current slice.
+pub(crate) fn accounting() -> ([u64; MAX_TASKS], [bool; MAX_TASKS]) {
+    let manager = TASKS.lock();
+    let mut runtime = manager.runtime;
+    if manager.started {
+        runtime[manager.current] += timestamp().saturating_sub(manager.switched_at);
+    }
+    (runtime, core::array::from_fn(|i| manager.tasks[i].state == TaskState::Ready))
 }
 
 extern "C" {
@@ -58,11 +81,13 @@ static TASKS: SpinLock<TaskManager> = SpinLock::new(TaskManager {
     ],
     current: 0,
     started: false,
+    runtime: [0; MAX_TASKS],
+    switched_at: 0,
 });
 
 /// Prepare each task's initial context frame.
 pub fn init() {
-    let mut manager = TASKS.lock();
+    let manager = TASKS.lock();
     for index in 0..MAX_TASKS {
         let top = manager.tasks[index].stack.0.as_ptr() as usize + STACK_SIZE;
         // Six saved registers plus the return address occupy 56 bytes. An extra
@@ -77,11 +102,15 @@ pub fn init() {
         }
         unsafe { RSPS[index] = frame as u64 };
     }
-    manager.started = true;
 }
 
 /// Start the first task. This call never returns.
 pub fn start() -> ! {
+    {
+        let mut manager = TASKS.lock();
+        manager.switched_at = timestamp();
+        manager.started = true;
+    }
     let mut discarded_rsp: u64 = 0;
     let first_rsp = unsafe { RSPS[0] };
     unsafe { switch_context(&mut discarded_rsp, first_rsp) }
@@ -110,6 +139,10 @@ pub fn yield_now() {
         if next == old {
             return;
         }
+        let now = timestamp();
+        let elapsed = now.saturating_sub(manager.switched_at);
+        manager.runtime[old] += elapsed;
+        manager.switched_at = now;
         manager.current = next;
         (old, unsafe { RSPS[next] })
         // The guard is dropped here. Switching while holding it would
@@ -206,6 +239,7 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
             diagnostics::println("  install   graphical installation wizard");
             diagnostics::println("  date      firmware wall-clock date and time");
             diagnostics::println("  meminfo   memory summary (alias of mem)");
+            diagnostics::println("  tasks     kernel task IDs and cumulative TSC time");
             diagnostics::println("  pwd       current directory (/)");
             diagnostics::println("  ls [path] list a Zenith FS directory");
             diagnostics::println("  mkdir path / touch path   create folder / file");
@@ -354,6 +388,15 @@ fn execute_command(line: &str, history: &[[u8; 128]], history_len: usize) {
             } else { diagnostics::println("date: RTC unavailable"); }
         }
         "pwd" => diagnostics::println("/"),
+        "tasks" => {
+            let (runtime, live) = accounting();
+            for (i, name) in TASK_NAMES.iter().enumerate() {
+                if live[i] {
+                    diagnostics::println(&alloc::format!("task {}: {} | {} TSC ticks", i + 1, name, runtime[i]));
+                }
+            }
+            diagnostics::println(&alloc::format!("Kernel heap bytes: {} / {}", crate::allocator::used(), crate::allocator::HEAP_SIZE));
+        }
         "ls" | "mkdir" | "touch" | "cat" => {
             let path = args.unwrap_or("").trim();
             let result = crate::fs::volume(|fs| {
@@ -495,6 +538,10 @@ fn shell_task() {
                     crate::wm::toggle_menu();
                     continue;
                 }
+                keyboard::Key::F(3) => {
+                    crate::wm::open_control();
+                    continue;
+                }
                 keyboard::Key::F(12) => {
                     crate::framebuffer::cycle_orientation();
                     continue;
@@ -512,6 +559,9 @@ fn shell_task() {
                 crate::wm::cycle_window(event.shift);
                 continue;
             }
+            if event.ctrl && event.alt && crate::wm::snap_key(event.key) { continue; }
+            if crate::wm::settings_navigation(event) { continue; }
+            if crate::wm::monitor_key(event) { continue; }
             if crate::wm::browser_key(event) {
                 continue;
             }
@@ -611,6 +661,20 @@ fn shell_task() {
                     }
                 }
                 keyboard::Key::Char(b'l') if event.ctrl => crate::framebuffer::clear_screen(),
+                keyboard::Key::Char(b'C' | b'c') if event.ctrl && event.shift => {
+                    crate::clipboard::set(core::str::from_utf8(&line[..length]).unwrap_or(""));
+                }
+                keyboard::Key::Char(b'v') if event.ctrl => {
+                    let text = crate::clipboard::text();
+                    // Never submit clipboard contents as a command. Only the
+                    // first line is eligible and it must fit the prompt.
+                    let first = text.lines().next().unwrap_or("");
+                    if length + first.len() < line.len() {
+                        line[length..length + first.len()].copy_from_slice(first.as_bytes());
+                        length += first.len();
+                        for &b in first.as_bytes() { diagnostics::console_putc(b); }
+                    }
+                }
                 keyboard::Key::Char(b'c') if event.ctrl => {
                     length = 0;
                     diagnostics::println("^C");

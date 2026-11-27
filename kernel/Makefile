@@ -10,6 +10,9 @@ WORKSPACE_TARGET := ../target/$(TARGET)/release
 HOST_TARGET := ../target/release
 
 CARGO := cargo
+# Hardware IRQ frames are pushed on the active kernel stack. The usual
+# user-space SysV red zone below RSP is not available to kernel code.
+KERNEL_RUSTFLAGS := $(RUSTFLAGS) -C no-redzone=yes
 AS := as
 ASFLAGS := --64
 LD := ld
@@ -25,7 +28,7 @@ all: $(KERNEL_NAME)
 # Build a linked kernel image using the host static library. This is the image
 # used by the Limine boot-image script when the bare-metal target is absent.
 image:
-	@$(CARGO) build -p zenith-kernel --release
+	@RUSTFLAGS="$(KERNEL_RUSTFLAGS)" $(CARGO) build -p zenith-kernel --release
 	@mkdir -p $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $(ARCH_DIR)/startup.s -o $(BUILD_DIR)/startup.o
 	$(AS) $(ASFLAGS) $(ARCH_DIR)/interrupts.s -o $(BUILD_DIR)/interrupts.o
@@ -35,7 +38,7 @@ image:
 
 # Native Limine-protocol image (real linear framebuffer).
 image-limine:
-	@$(CARGO) build -p zenith-kernel --release $(CARGO_BUILD_FLAGS)
+	@RUSTFLAGS="$(KERNEL_RUSTFLAGS)" $(CARGO) build -p zenith-kernel --release $(CARGO_BUILD_FLAGS)
 	@mkdir -p $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $(ARCH_DIR)/limine.s -o $(BUILD_DIR)/limine.o
 	$(AS) $(ASFLAGS) $(ARCH_DIR)/interrupts.s -o $(BUILD_DIR)/interrupts.o
@@ -59,7 +62,7 @@ $(KERNEL_NAME): build-rust $(OBJS)
 # Smoke-test in QEMU. Falls back to the host-built static library when the
 # bare-metal target is unavailable, which is enough to validate the boot path.
 qemu:
-	@$(CARGO) build -p zenith-kernel --release
+	@RUSTFLAGS="$(KERNEL_RUSTFLAGS)" $(CARGO) build -p zenith-kernel --release
 	@mkdir -p $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $(ARCH_DIR)/startup.s -o $(BUILD_DIR)/startup.o
 	$(AS) $(ASFLAGS) $(ARCH_DIR)/interrupts.s -o $(BUILD_DIR)/interrupts.o

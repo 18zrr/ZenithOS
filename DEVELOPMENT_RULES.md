@@ -85,7 +85,7 @@ These rules ensure consistent development practices while maintaining the qualit
 The complete official codename table and release checklist in `AGENTS.md`
 are mandatory for all future releases and supplement every rule above.
 Use `ZenithOS v<version> — <codename>` (currently
-**ZenithOS v0.3.2 — Nightfall**). All patches retain their major/minor series
+**ZenithOS v0.4.0 — Aurora** in development). All patches retain their major/minor series
 codename. Never substitute names for an assigned series; request approval
 before naming an unassigned series. Never change versions without an explicit
 request.

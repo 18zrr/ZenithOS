@@ -5,6 +5,10 @@ This document specifies the interfaces between various components of Zenith OS. 
 
 ## Kernel Interface Contracts
 
+For the implemented native app entry point, use the
+[Zenith x86_64 ABI v1](docs/native-app-abi.md). The conceptual interfaces
+below are not the syscall numbers of the `zenapp` dispatcher.
+
 ### System Call Interface
 ```
 fn syscall_handler(id: u64, args: [u64; 6]) -> u64 {

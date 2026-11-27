@@ -155,33 +155,27 @@ pub fn init() {
         }
     };
 
-    let inode = match fs.find("counter.txt") {
-        Some(inode) => inode,
-        None => match fs.create("counter.txt", false) {
-            Ok(inode) => inode,
-            Err(_) => {
-                diagnostics::debug("[fs] could not create counter.txt");
-                return;
-            }
-        },
-    };
-
-    let mut count = 0u32;
-    if let Ok(data) = fs.read(inode) {
-        if data.len() >= 4 {
-            count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    // This diagnostic is not a prerequisite for mounting a valid volume.
+    // Do not truncate an unrelated, oversized, or unreadable user file.
+    let counter = (|| match fs.resolve("counter.txt") {
+        Ok(id) => {
+            if fs.stat(id)? != (4, false) { return Err(FsError::InvalidPath); }
+            let bytes = fs.read_range(id, 0, 4)?;
+            let count = u32::from_le_bytes(bytes.try_into().map_err(|_| FsError::IoError)?).saturating_add(1);
+            fs.write(id, &count.to_le_bytes())?;
+            Ok(count)
         }
+        Err(FsError::FileNotFound) => fs.create_with_data("counter.txt", &1u32.to_le_bytes()).map(|_| 1),
+        Err(e) => Err(e),
+    })();
+    if let Ok(count) = counter {
+        diagnostics::puts("[fs] Zenith FS mounted; boot count = ");
+        diagnostics::put_hex(count as u64);
+        diagnostics::puts("\n");
+    } else {
+        diagnostics::debug("[fs] Zenith FS mounted; boot counter unavailable");
+        crate::notifications::post("Storage", "Mounted Zenith FS; boot counter unavailable");
     }
-    count += 1;
-
-    if fs.write(inode, &count.to_le_bytes()).is_err() {
-        diagnostics::debug("[fs] could not update counter.txt");
-        return;
-    }
-
-    diagnostics::puts("[fs] Zenith FS mounted; boot count = ");
-    diagnostics::put_hex(count as u64);
-    diagnostics::puts("\n");
     *VOLUME.lock() = Some(fs);
 
     init_fat32();

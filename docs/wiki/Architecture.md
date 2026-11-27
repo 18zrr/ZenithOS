@@ -20,7 +20,7 @@ All crates are members of the root `Cargo.toml` workspace. The release profile
 uses size optimisation and `panic = "abort"`.
 
 The kernel depends on `zenith-fs` for its filesystem drivers and on a global
-bump allocator (`kernel/src/allocator.rs`) so `alloc` types are available in
+free-list allocator (`kernel/src/allocator.rs`) so `alloc` types are available in
 `no_std` kernel code.
 
 ## Boot and kernel split
