@@ -9,7 +9,7 @@ remain compatibility paths. Older verification records below are historical.
 
 ## Aurora storage verification
 
-The locked workspace build and 47 tests passed. In QEMU, Aurora reopened a
+The locked workspace build and 48 tests passed. In QEMU, Aurora reopened a
 Nightfall data disk and copied its saved note through Explorer. The desktop
 storage regression also preserved an unrecognized disk byte for byte. See
 [release notes](RELEASE_NOTES.md) for journal and mount checks.

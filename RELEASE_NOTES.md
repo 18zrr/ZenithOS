@@ -12,6 +12,20 @@ writes v2 transactionally. The filesystem format remains v5. The terminal
 `tasks` command reports kernel task IDs, cumulative TSC time and live heap use.
 Ctrl+Alt+Left/Right snaps windows; Ctrl+Alt+Down restores the original bounds.
 
+### Pointer, Launchpad and Explorer fixes
+
+- Fixed PS/2 wheel identification and sample-rate negotiation, USB HID
+  protocol selection and UHCI interrupt endpoint scheduling. Wheel input
+  scrolls the hovered view. Explorer retains its selection and editor caret
+  while scrolling; compact Launchpad grids scroll within their bounds.
+  USB horizontal pan is forwarded to the optional browser companion.
+- Launchpad measures the version label with the same font used to draw it.
+  The header shows the complete workspace version alongside the Aurora title.
+- Double-click, Enter and Open now navigate folders or open supported plain
+  text in the native editor. Opening performs no writes. Unsupported types,
+  binary content and read failures show a status message; V retains the
+  quick preview. See the [desktop guide](docs/desktop_manual.md) for formats.
+
 Explorer adds four directory tabs, bounded back/forward history, breadcrumbs,
 search, sorting, grid/list views, marked-item transfers and a Locations sidebar.
 Cross-directory moves journal both parents and preserve the inode; collisions
@@ -41,10 +55,17 @@ available. See the [milestone plan](docs/aurora-development.md).
 
 ### Development build validation
 
-- `cargo build --workspace --locked` succeeded; all **47** workspace tests
+- `cargo build --workspace --locked` succeeded; all **48** workspace tests
   passed, including interrupted cross-directory moves and Save As during
   fragmented directory growth. Replacing a one-block file took seven sector
   writes on the test block device, including journal commit and clear.
+- `tools/test_aurora_pointer.py` passed in QEMU with PS/2 and UHCI USB
+  mice. It checked wheel direction and boundaries, list/grid and editor
+  scrolling, folder and file activation, unsupported content and a detached
+  disk read error. Reopening a saved document left the disk hash unchanged.
+  The complete Launchpad version was checked in framebuffer captures at
+  seven sizes from 640×480 to 3840×2160. HID horizontal pan passed the
+  decoder test; browser horizontal scrolling was not verified end to end.
 - Built the BIOS ISO and UEFI disk image. Both reached the compositor and
   shell in QEMU. OVMF screenshots showed live Monitor samples, filtering,
   Control Center notifications, and snapped/restored Explorer windows.

@@ -25,7 +25,9 @@ notification history and the clipboard.
 
 Right-click empty desktop space for Terminal, File Manager, Settings, About,
 or Refresh. Use Up/Down and Enter, or click an item; Esc dismisses the menu.
-F1 opens Start. Hover dock icons for labels. The clock and date use firmware
+F1 opens Launchpad. On short displays, wheel over the application tiles to
+reveal the remaining rows; the search box and session buttons stay in place.
+Arrow keys also bring the selected tile into view. Hover dock icons for labels. The clock and date use firmware
 time; `--:--` indicates an unavailable RTC.
 
 Use titlebar controls to minimize, maximize/restore or close windows. Drag
@@ -51,16 +53,21 @@ commits atomically. A collision stops the batch without overwriting; the
 status reports the completed count and remaining items can be retried.
 Delete and Rename act on the **current** row only.
 
-Use arrows, Home/End and Page Up/Down to select entries. Enter opens a folder
-or previews a file; Backspace goes up. F5 refreshes and retains the selected
-name when it still exists.
+Wheel over the list or grid to browse without changing the selected file.
+Use arrows, Home/End and Page Up/Down to move the selection. Single-click
+selects; double-click, Enter and **Open** all activate the selected entry.
+Folders open in the current tab. The built-in editor opens extensionless
+notes and `.txt`, `.md`, `.log`, `.cfg`, `.conf`, `.ini` and `.csv` as plain
+text (case-insensitive). It checks the contents before opening. Other
+extensions show a status message. Backspace goes up; F5 refreshes.
 
 - N: new file; D: new folder.
 - F2: rename (prefilled); Ctrl+A clears the name field.
 - C: copy a file to a new name in the same directory.
 - Delete: confirmation; Enter deletes, Esc cancels.
 - P: properties (type, bytes, mode and owner/group); Enter or Esc returns.
-- E: edit an ASCII text file.
+- V: preview the size and first line without opening the editor.
+- E: explicitly edit an ASCII text file, regardless of extension.
 
 Names must be single non-empty components; existing destinations are never
 overwritten by Copy or Save As. Errors are shown in the status area.
@@ -68,7 +75,8 @@ overwritten by Copy or Save As. Errors are shown in the status area.
 ## Editor
 
 A `*` marks unsaved changes. Arrows/Home/End move the cursor; hold Shift to
-select, or Ctrl+A to select all. Typing replaces the selection.
+select, or Ctrl+A to select all. Typing replaces the selection. Wheel
+scrolls the document without moving the insertion point or changing the file.
 
 Ctrl+C / Ctrl+X copies or cuts selected text. Ctrl+V pastes if the result
 fits the document. Terminal shares this clipboard: Ctrl+Shift+C copies
