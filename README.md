@@ -1,4 +1,8 @@
-# ZenithOS v0.3.2 — Nightfall
+# ZenithOS v0.4.0 — Aurora
+
+**Latest release:** [ZenithOS v0.4.0 — Aurora](https://github.com/18zrr/ZenithOS/releases/tag/v0.4.0).
+The current development branch targets **ZenithOS v0.4.1 — Aurora**.
+The [Aurora implementation plan](docs/aurora-development.md) tracks the milestone.
 
 Zenith OS is an independent x86_64 operating system written in Rust, with
 assembly for the boot entry points. It uses a custom monolithic kernel, a
@@ -6,14 +10,65 @@ custom filesystem (Zenith FS), and a custom graphical environment (Zenith UI).
 
 Release identity comes from `workspace.package.version` in `Cargo.toml` and
 `release-codenames.txt`. Patch releases retain their series codename.
-Nightfall is the 0.3.x release codename; Zenith UI is the desktop environment
+Aurora is the 0.4.x release codename; Zenith UI is the desktop environment
 and Afterglow is its theme. See [release policy](AGENTS.md).
 
-Image builders produce `zenithos-v0.3.2-nightfall-x86_64.iso`,
-`zenithos-v0.3.2-nightfall-x86_64-bios.img`, and
-`zenithos-v0.3.2-nightfall-x86_64-uefi.img`. They also copy to the existing
+## Download v0.4.0
+
+- [BIOS ISO — x86_64](https://github.com/18zrr/ZenithOS/releases/download/v0.4.0/zenithos-v0.4.0-aurora-x86_64.iso)
+- [UEFI disk image — x86_64](https://github.com/18zrr/ZenithOS/releases/download/v0.4.0/zenithos-v0.4.0-aurora-x86_64-uefi.img)
+- [Release notes](https://github.com/18zrr/ZenithOS/releases/tag/v0.4.0)
+
+To build the published release from source, check out tag `v0.4.0`.
+Image builders use the checked-out workspace version: the release tag produces
+`zenithos-v0.4.0-aurora-x86_64.iso`, `zenithos-v0.4.0-aurora-x86_64-bios.img`,
+and `zenithos-v0.4.0-aurora-x86_64-uefi.img`; the current development branch
+produces v0.4.1 filenames. Builders also copy to the existing
 `zenith.iso`, `zenith.img`, and `zenith-uefi.img` compatibility paths.
 Build metadata tools require Python 3.11 or newer.
+
+## What's new in v0.4.0
+
+Zenith Monitor graphs scheduler activity and live kernel heap use. Zenith
+Settings has eight pages, including storage and network information, and saves
+Monitor's refresh interval. Snap windows with Ctrl+Alt+Left/Right and restore
+with Ctrl+Alt+Down. The kernel now reuses freed memory.
+
+Zenith Explorer adds directory tabs, breadcrumbs, history, search, grid/list
+views and batch copy/move. F3 opens Control Center and notification history.
+The optional [native app ABI](docs/native-app-abi.md) runs a freestanding
+user-mode example; the regular desktop image retains its kernel-hosted apps.
+
+- **Scrolling:** repaired PS/2 wheel negotiation and USB HID delivery.
+  Scroll Launchpad, Explorer lists/grids, documents and system information.
+  Explorer scrolling preserves the selected file and editor insertion point.
+- **Launchpad:** the complete `v0.4.0` label uses centralized release metadata
+  and measured text width. Compact layouts scroll their application rows.
+- **File opening:** double-click, Enter or Open navigates directories or opens
+  supported plain text in the native editor. Unsupported formats and read
+  failures show an error; opening a document does not write to disk.
+- **Storage reliability:** bounded mount-time directory validation and smaller
+  journal transactions preserve the existing Zenith FS v5 format.
+
+### In development: v0.4.1
+
+The next maintenance build adds personalization reset, persistent Monitor
+sorting and Explorer view preferences, improved F2/F5 behavior and directory
+messages, focus restoration, a full-date clock tooltip, copying system
+information, and Monitor Pause/Resume. These additions are not included in
+the v0.4.0 downloads. See the [desktop guide](docs/desktop_manual.md) and
+[changelog](RELEASE_NOTES.md) for development details.
+
+### Aurora screenshot gallery
+
+Earlier Aurora development captures from QEMU at 1280×800. These show working
+applications; they predate the latest pointer fixes. Select an image for full size.
+
+| Zenith Settings | Zenith Monitor |
+| --- | --- |
+| [![Zenith Settings system information](docs/screenshots/aurora/settings.png)](docs/screenshots/aurora/settings.png) | [![Zenith Monitor task and storage statistics](docs/screenshots/aurora/monitor.png)](docs/screenshots/aurora/monitor.png) |
+| **Zenith Explorer** | **Zenith Control Center** |
+| [![Zenith Explorer directory tabs and files](docs/screenshots/aurora/explorer.png)](docs/screenshots/aurora/explorer.png) | [![Control Center and notification history](docs/screenshots/aurora/control-center.png)](docs/screenshots/aurora/control-center.png) |
 
 ### New in v0.3.2
 
@@ -31,19 +86,6 @@ and reads correctly across fragmented and unaligned block boundaries. Saves
 write the new file and its extent tree to free blocks before committing the
 inode, so a replacement needs temporary free space for the new contents.
 The disk format is still Zenith FS v5. See the [release notes](RELEASE_NOTES.md).
-
-## Aurora screenshot gallery
-
-These screenshots are from **ZenithOS v0.4.0 — Aurora**, a development build
-running in QEMU at 1280×800. The current published release is
-[ZenithOS v0.3.2 — Nightfall](https://github.com/18zrr/ZenithOS/releases/tag/v0.3.2).
-Select an image to view it at full size.
-
-| Zenith Settings | Zenith Monitor |
-| --- | --- |
-| [![Settings showing the boot path, CPU vendor and Monitor sampling interval](docs/screenshots/aurora/settings.png)](docs/screenshots/aurora/settings.png) | [![Monitor showing task CPU shares, kernel heap history and mounted storage](docs/screenshots/aurora/monitor.png)](docs/screenshots/aurora/monitor.png) |
-| **Zenith Explorer** | **Zenith Control Center** |
-| [![Explorer with two directory tabs and files on the Zenith FS volume](docs/screenshots/aurora/explorer.png)](docs/screenshots/aurora/explorer.png) | [![Control Center showing network status, power actions and a file creation notification](docs/screenshots/aurora/control-center.png)](docs/screenshots/aurora/control-center.png) |
 
 ## Layout
 
@@ -74,7 +116,8 @@ redraws do not flicker.
 - **Windows**: Terminal, File Manager, System Monitor, Settings, About and Browser. Every window has a
   title bar, app icon, minimise / maximise / close controls, a drop shadow when
   floating, and a bottom-right resize grip.
-- **Mouse**: PS/2 mouse on IRQ12 and a USB HID boot-protocol mouse on UHCI.
+- **Mouse**: PS/2 IntelliMouse wheel input on IRQ12 and USB HID report-protocol
+  mice on UHCI, with a boot-protocol fallback.
   Both feed one event queue: move to highlight controls, click to focus or
   raise a window, drag a title bar to move it, drag the corner grip to resize,
   use the taskbar to launch, restore or minimise apps, and change the accent
@@ -95,14 +138,18 @@ redraws do not flicker.
   its command history. The host browser companion is separate and stays running.
   Power controls try firmware ACPI S5 and reset registers on supported
   System I/O platforms, with VM and legacy fallbacks.
-- **File Manager**: open Start and search `file`. Select an entry, then **Open**
-  (or **Enter**) to browse a folder or preview a file. Use **Up** or **Backspace**
+- **File Manager**: open Start and search `file`. Double-click an entry, or use
+  **Open** / **Enter**, to browse a folder or open supported plain text.
+  Extensionless notes and `.txt`, `.md`, `.log`, `.cfg`, `.conf`, `.ini` and
+  `.csv` files open in the native editor after content validation.
+  **V** previews a file's size and first line. Use **Up** or **Backspace**
   for the parent folder. Create files (`N`) and folders (`D`), rename (`F2`),
   copy a file in the same folder (`C`, up to 256 KiB), or delete (`Delete`).
   Enter the name and press **Enter**, or **Esc** to cancel. A non-empty folder
   must be emptied before deletion.
 - **Edit a note**: select a file and press **E** or click **Edit**. Type text,
-  press **Enter** for a newline, **Ctrl+S** to save, or **Esc** to discard.
+   press **Enter** for a newline, **Ctrl+S** to save, or **Esc** to close.
+   Unsaved changes prompt for save, discard or cancel.
   The editor accepts printable ASCII and LF newlines, up to 4 KiB. A failed
   save leaves the draft open. **F2** starts a rename with the old name filled
   in; **Home**, **End**, **PgUp** and **PgDn** navigate directory listings.
@@ -205,6 +252,16 @@ implemented subsystems — nothing is simulated.
 
 ## Current status (verified)
 
+- **48 workspace tests passed**, with a successful locked workspace build.
+- QEMU PS/2 and USB pointer regressions verified scroll direction and bounds,
+  file activation, unsupported content, detached-disk errors and unchanged
+  disk contents after reopening a document.
+- Launchpad's full version label was checked in framebuffer captures at seven
+  resolutions from 640×480 to 3840×2160. Updated BIOS ISO and UEFI images booted.
+- Desktop/storage persistence, heap reclamation, native ABI and ELF regressions
+  passed. The browser companion test could not run without Chromium and Xvfb;
+  horizontal browser scrolling remains unverified end to end. No physical
+  hardware tests were performed. See [release notes](RELEASE_NOTES.md).
 - `cargo test --workspace --locked` runs the host-side regression suite.
   To exercise file editing, window switching and persistence through a reboot,
   build a fresh ISO and run `python3 tools/test_desktop_storage.py zenith.iso`.
@@ -218,7 +275,7 @@ implemented subsystems — nothing is simulated.
   window manager, cooperative scheduler, PS/2 keyboard, PS/2 and USB HID mouse,
   CMOS clock.
 - Drivers: PCI, ATA PIO read/write, ACPI RSDP, e1000 (TX/MAC/link), UHCI USB
-  host controller with HID boot-protocol mouse enumeration and polling, NVIDIA
+   host controller with HID report/boot-protocol mouse enumeration and polling, NVIDIA
   detection/probing, PS/2 mouse (IRQ12).
 - Zenith FS v5: write-ahead journaling with replay, extents, 64-bit file sizes
   and sparse files (tested with a 200 GiB file), Unix rwx permissions with
@@ -239,7 +296,7 @@ implemented subsystems — nothing is simulated.
 - Compositing is software-only, capped at roughly 100 Hz. Resolution can be
   changed live in Settings on QEMU/VirtualBox Bochs VBE adapters; physical PCs
   use the boot-time Limine mode. There is no native GPU mode setting, monitor
-  Hz control, HiDPI scaling, multi-monitor support or window snapping.
+  Hz control, HiDPI scaling or multi-monitor support.
 - UEFI boot was verified with **512 MiB** of guest RAM. With 128 MiB the Limine
   loader itself runs out of high memory before the kernel starts.
 - e1000 RX path is written but unvalidated; no live DHCP/UDP/TCP exchange.
@@ -248,17 +305,19 @@ implemented subsystems — nothing is simulated.
 - Native GPU driver (nouveau for RTX 4070 SUPER) and Linux compatibility are
   not implemented — they need proprietary firmware/hardware or an OS-scale
   effort. Graphics come from Limine's VBE/GOP framebuffer.
-- Userland apps are host harnesses; no syscall-driven OS process model yet.
+- Regular desktop apps remain kernel-hosted. The opt-in native ABI supports
+  a user-mode example, notifications, statistics and exit; concurrent
+  independent desktop processes and a user-space window/event ABI remain future work.
 - No login/authentication: kernel starts as root.
 
 ## Building and booting
 
 ```bash
-cargo build --workspace
-cargo test --workspace
+cargo build --workspace --locked
+cargo test --workspace --locked
 ./build.sh                      # release build of all userland apps
 ./test_build.sh                 # workspace + kernel verification
-cd kernel && make qemu          # QEMU PVH direct load
+make -C kernel qemu             # QEMU PVH direct load
 ./build_image.sh                # BIOS disk image  -> zenith.img
 ./build_uefi_image.sh           # UEFI disk image  -> zenith-uefi.img
 ```
@@ -266,15 +325,15 @@ cd kernel && make qemu          # QEMU PVH direct load
 Boot a disk image (or the ISO below). Use `-display gtk` (or your default
 display) to see the desktop instead of `-display none`:
 ```bash
-qemu-system-x86_64 -drive format=raw,file=zenith.img -serial stdio
-qemu-system-x86_64 -cdrom zenith.iso -boot d -serial stdio
+qemu-system-x86_64 -m 512 -drive format=raw,file=zenith.img -serial stdio
+qemu-system-x86_64 -m 512 -cdrom zenith.iso -boot d -serial stdio
 ```
 
 QEMU's default PS/2 mouse works without extra flags. To attach a USB HID mouse
 as well, add `-usb -device usb-mouse`:
 
 ```bash
-qemu-system-x86_64 -drive format=raw,file=zenith.img -serial stdio \
+qemu-system-x86_64 -m 512 -drive format=raw,file=zenith.img -serial stdio \
   -usb -device usb-mouse
 ```
 
@@ -296,7 +355,7 @@ boot files with an El Torito BIOS boot entry:
 
 ```bash
 ./build_iso.sh
-qemu-system-x86_64 -cdrom zenith.iso -boot d -display none -serial stdio
+qemu-system-x86_64 -m 512 -cdrom zenith.iso -boot d -display none -serial stdio
 ```
 
 The ISO is **verified bootable** in QEMU: it loads Limine, the kernel, the
